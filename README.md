@@ -5,9 +5,14 @@
 ## 구조
 
 ```
-supabase/migrations/20261105000000_partylink_schema_v2.sql   스키마 v2 (테이블, ENUM, 트리거, 업무 함수, RLS)
-scripts/reset_dev_only.sql                                   ⚠️ 개발용 초기화 — 파티링크 테이블/데이터 전부 삭제
+supabase/migrations/20261105000000_partylink_schema_v2.sql            스키마 v2 (테이블, ENUM, 트리거, 업무 함수, RLS)
+supabase/migrations/20261106000000_party_connect_integration.sql      웹 연동: 파티 표시 컬럼 + 목록/프로필/내 신청 함수
+supabase/functions/partylink-api/                                     웹 ↔ DB Edge Function (카카오 로그인 토큰 검증)
+docs/party-connect-integration.md                                     카카오 로그인 + 웹 연동 설정 가이드
+scripts/reset_dev_only.sql                                            ⚠️ 개발용 초기화 — 파티링크 테이블/데이터 전부 삭제
 ```
+
+웹사이트(party-connect-mvp)와 카카오 로그인 연결은 [docs/party-connect-integration.md](docs/party-connect-integration.md)를 참고하세요.
 
 ## 적용 방법
 
@@ -72,6 +77,9 @@ APPLIED ─approve─▶ APPROVED ─verify_visit─▶ VISITED ─submit_missio
 | `mark_noshow(app, store, ...)` | 점주 | 노쇼 + 벌점, 기준 초과 시 30일 자동 차단 |
 | `charge_deposit(store, amount, depositor, ...)` | 관리자 | 입금 확인 후 충전 |
 | `refund_deposit(store, amount, ...)` | 관리자 | 잔액 환불 |
+| `list_open_parties()` | Edge Function | 모집 중 파티 + 점포 정보 + 선정/신청 인원 |
+| `upsert_guest_profile(user, name, phone, email)` | Edge Function | 카카오 사용자 → guests 프로필 생성/갱신 |
+| `guest_applications(user)` | Edge Function | 내 신청 내역 (선정 시 방문 코드) |
 
 ## 에러 코드 (SQLSTATE)
 
@@ -96,4 +104,5 @@ APPLIED ─approve─▶ APPROVED ─verify_visit─▶ VISITED ─submit_missio
 
 - [ ] 정기 작업: 마감된 슬롯 `CLOSED` / 종료된 파티 `FINISHED` 전환, 미션 제출 후 N일 경과 시 자동 승인
 - [ ] 점주용 지원자 목록 view (연락처 제외)
-- [ ] 백엔드 API 연동
+- [x] 웹(party-connect-mvp) 카카오 로그인 + 신청 연동 — `partylink-api` Edge Function
+- [ ] 점주용 화면 (선정, QR 방문 인증, 미션 승인)
