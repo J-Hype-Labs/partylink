@@ -1,0 +1,13 @@
+# 환경 변수 (Supabase service_role 키 등) — 절대 커밋 금지
+.env
+.env.*
+!.env.example
+
+# Supabase CLI 로컬 산출물
+supabase/.branches
+supabase/.temp
+
+# OS / 에디터
+.DS_Store
+.vscode/
+.idea/
