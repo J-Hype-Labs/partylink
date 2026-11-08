@@ -1,146 +1,173 @@
-# party-connect-mvp ↔ PartyLink DB 연동 가이드 (카카오 로그인)
+# PartyConnect 웹 ↔ PartyLink DB 연동 가이드
 
-웹사이트 [party-connect-mvp](https://github.com/J-Hype-Labs/party-connect-mvp)의 카카오 로그인과 체험단 신청을 이 저장소의 DB에 연결하는 방법입니다.
+- 기준일: 2026-11-08
+- 프런트엔드 저장소: https://github.com/J-Hype-Labs/party-connect-mvp
+- 백엔드 저장소: https://github.com/J-Hype-Labs/partylink
+- 관련 백엔드 PR: https://github.com/J-Hype-Labs/partylink/pull/1
+- 프런트엔드 인증 상세: https://github.com/J-Hype-Labs/party-connect-mvp/blob/main/docs/AUTH_IMPLEMENTATION_SPEC.md
 
-## 구조
+이 문서는 PartyConnect의 Kakao OAuth/Supabase Auth와 PartyLink DB API의 연동 계약 및 배포 순서를 설명한다. 현재 문서에 적힌 코드/설정이 운영 Supabase에 배포되었다는 뜻은 아니다.
 
-```
-[GitHub Pages 웹사이트]                [Supabase Edge Function]              [Postgres]
- party-connect-mvp/index.html   ──▶   partylink-api                 ──▶   SQL 함수
-  - supabase-js 로 카카오 로그인        - 로그인 토큰 검증 (auth.getUser)        list_open_parties
-  - anon 키만 보유                     - 토큰의 user id 로 게스트 식별           upsert_guest_profile
-                                      - service_role 로 DB 함수 호출           apply_to_slot / cancel_application
-                                                                             guest_applications
-```
+## 1. 현재 상태
 
-- 브라우저에는 **anon(publishable) 키만** 들어갑니다. service_role 키는 Edge Function 안에만 있습니다.
-- 게스트는 요청 body가 아니라 **카카오 로그인 토큰**으로 식별합니다. 다른 사람 이름으로 신청할 수 없습니다.
-- 카카오는 전화번호를 기본으로 주지 않기 때문에, 첫 신청 때 입력한 이름·연락처로 `guests` 프로필을 만들고 이후 신청할 때마다 갱신합니다.
+- Edge Function 및 웹 연동 migration은 feature/party-connect-integration 브랜치의 PR #1에 있다.
+- PR #1은 2026-11-08 기준 OPEN이다.
+- 프런트엔드 main에는 Supabase Auth PKCE 호출과 Edge Function 호출 코드가 있으나 PARTYLINK_CONFIG의 URL/공개 키가 비어 있다.
+- 실제 Kakao OAuth, 실제 DB 저장·조회·취소는 검증되지 않았다.
+- 관리자 화면은 별도 작업이며 현재 프런트엔드 하드코딩 비밀번호를 운영 권한으로 사용해서는 안 된다.
 
-## API
+## 2. 아키텍처
+
+브라우저:
+- Kakao OAuth 시작은 Supabase Auth client를 사용한다.
+- 브라우저에는 Supabase 공개용 publishable/anon key만 둔다.
+- service_role key와 Kakao Client Secret은 절대 포함하지 않는다.
+
+인증:
+1. 사용자가 Kakao 로그인 버튼을 누른다.
+2. Supabase Auth가 Kakao provider로 인증을 시작한다.
+3. Kakao는 Supabase Auth callback으로 인가 결과를 반환한다.
+4. Supabase Auth가 세션을 생성하고 브라우저 앱으로 복귀시킨다.
+5. Edge Function은 Authorization Bearer token을 auth.getUser로 검증한다.
+6. 검증된 auth.users.id로 게스트 프로필과 신청 데이터를 연결한다.
+
+사용자 ID를 요청 body에서 받거나 브라우저가 지정한 guest_id를 신뢰하지 않는다.
+
+## 3. API 계약
 
 | 메서드 | 경로 | 로그인 | 설명 |
 |---|---|---|---|
-| GET | `/functions/v1/partylink-api/parties` | 불필요 | 모집 중인 파티 목록 (웹 카드 형태) |
-| GET | `/functions/v1/partylink-api/applications` | 필요 | 내 신청 내역 (선정 시 방문 코드 포함) |
-| POST | `/functions/v1/partylink-api/applications` | 필요 | 신청 `{ slotId, name, phone, agree }` |
-| POST | `/functions/v1/partylink-api/applications/:id/cancel` | 필요 | 신청 취소 (파티 시작 전) |
+| GET | /functions/v1/partylink-api/parties | 불필요 | 모집 중인 파티 목록 |
+| GET | /functions/v1/partylink-api/applications | 필요 | 현재 회원의 신청 내역 |
+| POST | /functions/v1/partylink-api/applications | 필요 | 신청: slotId, name, phone, agree |
+| POST | /functions/v1/partylink-api/applications/:id/cancel | 필요 | 본인 신청 취소 |
 
-에러는 `{ code, message }` 형태로 오고, `message`는 화면에 그대로 보여 줄 수 있는 한국어 문장입니다.
+응답 오류는 code와 한국어 message를 포함한다. 화면은 빈 목록과 API 오류를 구분한다.
 
----
+현재 handler는 첫 신청 시 이름·연락처 등으로 guests 프로필을 upsert하고 auth user ID에 연결한다. Kakao 이메일은 제공되지 않을 수 있으므로 필수 식별자로 사용하지 않는다.
 
-## 설정 순서
+회원 온보딩 동의 이력의 별도 영속 테이블/API는 현재 migration에서 확인되지 않았다. 서비스 이용약관·개인정보 처리 동의 기록이 필요하면 별도 migration, API, 테스트를 추가해야 한다. 브라우저 localStorage만으로 가입 완료를 판정하지 않는다.
 
-### 1. DB 마이그레이션 적용
+## 4. Kakao Developers 설정
 
-Supabase SQL Editor에서 아래 파일 전체를 실행합니다. (v2 스키마가 이미 설치돼 있어야 합니다.)
+https://developers.kakao.com/
 
-```
+1. 서비스 Kakao 애플리케이션 확인
+2. Web 플랫폼에 https://j-hype-labs.github.io 등록
+3. 로컬 테스트가 필요하면 http://localhost:3000 등록
+4. Kakao Login 활성화
+5. Supabase Dashboard의 Kakao Provider 화면에서 정확한 provider callback URI 확인
+6. Kakao Redirect URI에 다음 형식의 Supabase 주소 등록:
+   https://<SUPABASE_PROJECT_REF>.supabase.co/auth/v1/callback
+7. 필요한 동의항목만 요청
+8. 이메일은 선택 정보로 취급하고, 미제공 사용자의 인증 허용 설정 확인
+9. REST API Key와 Client Secret 준비
+
+Kakao Client Secret은 Supabase Provider 설정에만 입력한다. 프런트엔드나 GitHub 문서에 기록하지 않는다.
+
+## 5. Supabase Auth 설정
+
+Authentication → Sign In / Providers → Kakao
+
+- Kakao Provider 활성화
+- Kakao REST API Key 입력
+- Kakao Client Secret 입력
+- 이메일 미제공 사용자 허용 여부 확인
+
+Authentication → URL Configuration
+
+- Site URL: https://j-hype-labs.github.io/party-connect-mvp/
+- Redirect URL은 실제 프런트엔드가 redirectTo로 보내는 URL만 허용한다.
+- 중앙 callback 페이지를 구현한 뒤에는 https://j-hype-labs.github.io/party-connect-mvp/auth/callback/ 을 추가한다.
+- 현재 배포 코드가 로그인 시작 페이지의 현재 URL을 redirectTo로 사용한다는 점을 고려해, callback 페이지가 구현되기 전에는 존재하지 않는 경로를 임의 등록하지 않는다.
+- 불필요한 와일드카드 redirect는 사용하지 않는다.
+
+Kakao provider callback(Supabase 주소)과 Supabase의 앱 복귀 redirectTo(웹사이트 주소)는 서로 다른 주소다.
+
+## 6. DB migration
+
+PR #1의 웹 연동 migration:
+
 supabase/migrations/20261106000000_party_connect_integration.sql
-```
 
-### 2. 카카오 디벨로퍼스 설정 — https://developers.kakao.com
+실행 전:
+- 현재 대상 DB의 schema/version 확인
+- 기본 v2 스키마 선행 조건 확인
+- 백업/복구 계획 확인
+- 스테이징 우선 적용
 
-1. **내 애플리케이션 → 애플리케이션 추가하기**로 앱을 만듭니다.
-2. **앱 설정 → 플랫폼 → Web**에 사이트 도메인을 등록합니다.
-   - `https://j-hype-labs.github.io`
-   - (로컬 테스트용) `http://localhost:3000`
-3. **제품 설정 → 카카오 로그인**
-   - 활성화 설정을 **ON**으로 합니다.
-   - **Redirect URI**에 `https://<프로젝트ref>.supabase.co/auth/v1/callback`을 추가합니다. (Supabase 대시보드 → Authentication → Providers → Kakao 화면에 정확한 주소가 나옵니다.)
-4. **제품 설정 → 카카오 로그인 → 동의항목**
-   - 닉네임, 프로필 사진: 필수 또는 선택 동의
-   - 카카오계정(이메일): 비즈 앱이어야 설정할 수 있습니다. 비즈 앱이 아니면 6단계의 "이메일 없는 사용자 허용"을 켜세요.
-5. **제품 설정 → 카카오 로그인 → 보안**에서 **Client Secret**을 생성하고 활성화합니다.
-6. **앱 설정 → 앱 키**에서 **REST API 키**를 확인합니다.
+migration은 party_slots 표시 컬럼과 service_role 전용 함수를 추가한다. 운영 DB에서 reset_dev_only.sql을 실행하지 않는다.
 
-### 3. Supabase Auth 설정
+## 7. Edge Function 배포
 
-1. **Authentication → Providers → Kakao**
-   - Enable: ON
-   - **REST API Key**: 2-6의 REST API 키
-   - **Client Secret Code**: 2-5의 Client Secret
-   - 이메일 동의항목을 못 쓰는 경우: **Allow users without an email** ON
-2. **Authentication → URL Configuration**
-   - **Site URL**: `https://j-hype-labs.github.io/party-connect-mvp/`
-   - **Redirect URLs**: `https://j-hype-labs.github.io/party-connect-mvp/**`, `http://localhost:3000/**`
+PR #1 병합과 코드 리뷰 후 대상 프로젝트를 확인하고 실행한다.
 
-### 4. Edge Function 배포 (Supabase CLI)
+- supabase login
+- supabase link --project-ref <project-ref>
+- supabase functions deploy partylink-api --no-verify-jwt
+- supabase secrets set ALLOWED_ORIGINS=https://j-hype-labs.github.io,http://localhost:3000
 
-```bash
-supabase login
-```
+SUPABASE_URL과 SUPABASE_SERVICE_ROLE_KEY는 Supabase Edge Function의 서버 환경에서만 사용한다.
 
-```bash
-supabase link --project-ref <프로젝트ref>
-```
+--no-verify-jwt는 공개 파티 목록을 위해 gateway 검사를 끄는 설정이다. 로그인 필수 API는 handler 내부에서 auth.getUser로 토큰을 검증해야 한다.
 
-```bash
-supabase functions deploy partylink-api --no-verify-jwt
-```
+## 8. 프런트엔드 설정 및 모드
 
-```bash
-supabase secrets set ALLOWED_ORIGINS=https://j-hype-labs.github.io,http://localhost:3000
-```
+현재 프런트엔드 main의 두 HTML에는 PARTYLINK_CONFIG가 각각 존재하며 supabaseUrl과 supabaseAnonKey가 빈 문자열이다.
 
-- `--no-verify-jwt`: 로그인하지 않은 사용자도 파티 목록을 볼 수 있도록 게이트웨이의 JWT 검사를 끕니다. 로그인이 필요한 경로는 함수 안에서 토큰을 직접 검증합니다.
-- `SUPABASE_URL`과 `SUPABASE_SERVICE_ROLE_KEY`는 Supabase가 자동으로 넣어 주므로 따로 설정하지 않습니다.
+현재 코드 모드:
+- URL/공개 키가 비어 있으면 데모 모드
+- 설정값이 있고 localhost가 아니면 기본 실서비스 모드
+- localhost는 ?live=1일 때 실서비스 모드
+- ?demo=1은 설정이 있어도 데모 모드를 강제할 수 있음
 
-### 5. 웹사이트 설정
+이는 현재 구현을 설명하는 표이며 운영 권장 정책이 아니다.
 
-`party-connect-mvp/index.html`의 `window.PARTYLINK_CONFIG`에 두 값을 넣습니다.
+실제 사용자 운영 전 필수 변경:
+- production에서 URL 파라미터로 demo mode를 강제할 수 없게 한다.
+- production 설정 누락 시 fail-closed 처리한다.
+- 운영 API 실패 시 localStorage fixture로 성공처럼 대체하지 않는다.
+- 개발/CI 데모 모드는 별도 환경에서만 허용한다.
+- 두 페이지의 설정과 Auth client를 공통 모듈로 통합한다.
 
-```js
-window.PARTYLINK_CONFIG = {
-  supabaseUrl: "https://<프로젝트ref>.supabase.co",
-  supabaseAnonKey: "<anon 또는 publishable 키>",   // ⚠️ service_role 키 금지
-};
-```
+브라우저 설정에는 Supabase Project URL과 공개용 publishable/anon key만 둔다. service_role, Kakao Client Secret, 관리자 비밀번호는 절대 넣지 않는다.
 
-**실서비스 모드**는 아래 조건에서 켜집니다.
+## 9. 운영 테스트
 
-| 상황 | 모드 |
-|---|---|
-| 두 값이 비어 있음 | 데모 (기존 localStorage 동작) |
-| 배포 사이트 (github.io) | 실서비스 |
-| localhost | 데모 (CI E2E 테스트 보호) |
-| localhost + `?live=1` | 실서비스 (로컬 연동 테스트) |
-| 어디서든 `?demo=1` | 데모 강제 |
+- [ ] 실제 Kakao 테스트 계정 로그인
+- [ ] Supabase Auth 사용자 생성 확인
+- [ ] 새로고침 및 페이지 이동 후 세션 유지
+- [ ] 로그아웃 후 재로그인
+- [ ] 비로그인 신청 API가 거부됨
+- [ ] 로그인 회원의 신청 저장
+- [ ] 같은 회원의 신청 조회
+- [ ] 본인 신청 취소
+- [ ] 중복 신청 차단
+- [ ] 다른 회원의 신청 조회/취소 거부
+- [ ] 모집 마감 및 정원 초과 서버 검증
+- [ ] RLS와 service_role 함수 권한 검증
+- [ ] CORS allowlist 검증
+- [ ] service_role 키 브라우저 노출 없음
 
-### 6. 파티 등록 (임시: SQL)
+Mock 테스트 통과는 실제 Kakao OAuth/운영 DB 테스트를 대체하지 않는다.
 
-관리자 화면은 아직 localStorage 기반이므로, 실서비스 파티는 SQL로 등록합니다.
+## 10. 운영 범위 경계
 
-```sql
--- 점포 (점주 카카오 로그인 후 auth.users.id 를 owner_user_id 로)
-INSERT INTO stores (owner_user_id, name, business_reg_no, owner_name, phone, address, region)
-VALUES ('<점주 user id>', '43번지 혼술바', '123-45-67890', '홍길동', '01012345678',
-        '서울 중구 을지로11길 19', '명동/을지로')
-RETURNING id;
+PartyLink는 Kakao 계정 인증과 파티 신청 데이터를 처리한다. 회원 인증을 위해 생년월일·나이·연령 확인 정보를 수집하거나 관련 인증 API/DB 상태를 만들지 않는다. 현장에서 필요한 확인은 파티 현장 운영자가 담당한다.
 
--- 파티 (region 은 웹 지역 필터 값과 같게: '명동/을지로', '홍대/마포' …)
-INSERT INTO party_slots (store_id, title, description, benefit, starts_at, ends_at, recruit_deadline,
-                         capacity, status, category, images, badges, is_featured)
-VALUES ('<store id>', '[을지로] 금요 혼술 파티', '퇴근 후 가볍게 한잔!', '하이볼 2잔 + 안주',
-        '2026-11-13 19:00+09', '2026-11-13 22:00+09', '2026-11-12 23:59+09',
-        6, 'OPEN', '혼술바', ARRAY['https://…/photo.jpg'], ARRAY['NEW'], false);
-```
+## 11. 남은 작업
 
-선정, 방문 인증, 승인(수수료 차감)은 기존 함수(`approve_application`, `verify_visit`, `complete_application` 등)를 사용합니다.
+- [ ] PR #1 코드 리뷰 및 main 병합
+- [ ] 스테이징 DB migration 적용
+- [ ] Edge Function 배포
+- [ ] Kakao Provider 설정
+- [ ] 프런트엔드 설정 및 production demo 차단
+- [ ] 회원 동의 이력 저장 기능
+- [ ] 실제 OAuth 및 신청 통합 테스트
+- [ ] 관리자 인증을 서버 측 권한으로 전환
+- [ ] 운영 적용 승인
 
----
-
-## 테스트
-
-```bash
-deno test --allow-env supabase/functions/partylink-api/handler_test.ts
-```
-
-## 현재 범위와 남은 일
-
-- ✅ 카카오 로그인 (Supabase Auth), 파티 목록, 신청, 취소, 내 신청 내역(상태·방문 코드)
-- ⏳ 네이버 로그인: Supabase에 기본 Naver 제공자가 없어 별도 구현이 필요합니다. 실서비스 모드에서는 "준비 중"으로 안내합니다.
-- ⏳ 관리자 화면(파티·신청·후기 관리)은 아직 localStorage 기반입니다. 실서비스 데이터는 Supabase 대시보드나 SQL로 관리합니다.
-- ⏳ 점주용 화면(선정, QR 방문 인증, 미션 승인)
-- ⏳ 찜하기, 후기, 알림은 브라우저 localStorage에만 저장됩니다.
+관련 공식 문서:
+- Supabase Kakao provider: https://supabase.com/docs/guides/auth/social-login/auth-kakao
+- Supabase redirect URLs: https://supabase.com/docs/guides/auth/redirect-urls
+- Kakao Developers: https://developers.kakao.com/docs/latest/ko/kakaologin/common
