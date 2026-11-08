@@ -78,8 +78,10 @@ Authentication → URL Configuration
 
 - Site URL: https://j-hype-labs.github.io/party-connect-mvp/
 - Redirect URL은 실제 프런트엔드가 redirectTo로 보내는 URL만 허용한다.
-- 중앙 callback 페이지를 구현한 뒤에는 https://j-hype-labs.github.io/party-connect-mvp/auth/callback/ 을 추가한다.
-- 현재 배포 코드가 로그인 시작 페이지의 현재 URL을 redirectTo로 사용한다는 점을 고려해, callback 페이지가 구현되기 전에는 존재하지 않는 경로를 임의 등록하지 않는다.
+- 프런트엔드 main SHA 9949f53에 auth/callback/index.html은 추가되어 있다.
+- 다만 현재 js/auth-service.js의 loginWithKakao()는 redirectTo로 로그인 시작 페이지의 현재 URL을 지정한다. 따라서 callback 페이지가 실제 redirect target으로 사용된다고 단정하지 않는다.
+- 구현에서 중앙 callback URL을 redirectTo로 통일한 뒤 https://j-hype-labs.github.io/party-connect-mvp/auth/callback/ 을 allowlist에 추가한다.
+- callback 연결 전에는 현재 코드가 실제로 사용하는 URL만 허용하고, 존재하지 않는 경로를 임의 등록하지 않는다.
 - 불필요한 와일드카드 redirect는 사용하지 않는다.
 
 Kakao provider callback(Supabase 주소)과 Supabase의 앱 복귀 redirectTo(웹사이트 주소)는 서로 다른 주소다.
