@@ -18,6 +18,32 @@ export class HttpError extends Error {
 
 type DbError = { code?: string; message?: string; details?: string };
 
+const STATUS_KO: Record<string, string> = {
+  APPLIED: "신청", APPROVED: "선정", VISITED: "방문 인증", MISSION_SUBMITTED: "미션 제출",
+  COMPLETED: "완료", NOSHOW: "노쇼", REJECTED: "반려", CANCELLED: "취소",
+};
+
+// "Invalid status transition: COMPLETED -> COMPLETED" 같은 DB 메시지를 운영자가 이해할 문장으로
+function transitionMessage(msg: string): string {
+  const m = msg.match(/transition:\s*([A-Z_]+)\s*->\s*([A-Z_]+)/);
+  if (!m) return "현재 상태에서는 처리할 수 없습니다.";
+  const [, from, to] = m;
+  if (from === to) return "이미 처리된 신청입니다. 목록을 새로고침해 주세요.";
+  const fromKo = STATUS_KO[from];
+  if (!fromKo) return "현재 상태에서는 처리할 수 없습니다.";
+  return `신청이 이미 '${fromKo}' 상태라 이 작업을 할 수 없습니다. 목록을 새로고침해 주세요.`;
+}
+
+// 적립금 부족: 얼마나 모자란지 알려 줘야 충전 금액을 정할 수 있다
+function shortageMessage(detail: unknown): string {
+  const d = (detail && typeof detail === "object" ? detail : {}) as Record<string, unknown>;
+  const won = (n: unknown) => typeof n === "number" && Number.isFinite(n) ? `${n.toLocaleString("ko-KR")}원` : null;
+  const shortage = won(d.shortage), balance = won(d.balance), required = won(d.required);
+  if (!shortage) return "적립금 잔액이 부족합니다.";
+  const tail = balance && required ? ` (잔액 ${balance}, 필요 ${required})` : "";
+  return `적립금이 ${shortage} 부족합니다.${tail} 점포·적립금에서 충전한 뒤 다시 승인해 주세요.`;
+}
+
 export function fromDbError(e: DbError): HttpError {
   const msg = e.message ?? "";
   let detail: unknown = e.details;
@@ -38,7 +64,7 @@ export function fromDbError(e: DbError): HttpError {
     case "23505": // UNIQUE 위반 (사업자등록번호, 점주 계정 중복)
       return new HttpError(409, "이미 등록된 사업자등록번호 또는 점주 계정입니다.", e.code);
     case "PL402":
-      return new HttpError(402, "적립금 잔액이 부족합니다.", e.code, detail);
+      return new HttpError(402, shortageMessage(detail), e.code, detail);
     case "PL403":
       return new HttpError(403, "권한이 없습니다.", e.code);
     case "PL404":
@@ -46,9 +72,10 @@ export function fromDbError(e: DbError): HttpError {
     case "PL409":
       if (/already applied/i.test(msg)) return new HttpError(409, "이미 신청한 파티입니다.", e.code);
       if (/phone number is already/i.test(msg)) return new HttpError(409, "이미 다른 계정에 등록된 연락처입니다.", e.code);
-      return new HttpError(409, "현재 상태에서는 처리할 수 없습니다.", e.code);
+      return new HttpError(409, transitionMessage(msg), e.code);
     case "PL410":
       if (/cancel/i.test(msg)) return new HttpError(410, "파티가 시작된 후에는 취소할 수 없습니다.", e.code);
+      if (/party window/i.test(msg)) return new HttpError(410, "방문 인증은 파티 진행 시간에만 할 수 있습니다.", e.code);
       return new HttpError(410, "모집이 마감되었거나 정원이 찼습니다.", e.code);
     case "PL423":
       return new HttpError(423, "노쇼 누적 등으로 신청이 제한된 계정입니다.", e.code, detail);
