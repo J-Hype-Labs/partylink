@@ -234,6 +234,26 @@ Deno.test("POST /admin/stores/:id/charge passes the admin id from the token, val
   assertEquals(rpcCalls.length, 0);
 });
 
+Deno.test("admin-facing DB errors explain what happened (shortage amount, party window, status)", async () => {
+  const cases: [string, string, string | null, number, string][] = [
+    ["PL402", "Insufficient prepaid balance: balance=3000, required=10000",
+      JSON.stringify({ balance: 3000, required: 10000, shortage: 7000 }), 402,
+      "적립금이 7,000원 부족합니다. (잔액 3,000원, 필요 10,000원) 점포·적립금에서 충전한 뒤 다시 승인해 주세요."],
+    ["PL410", "Visit verification is only allowed during the party window", null, 410, "방문 인증은 파티 진행 시간에만 할 수 있습니다."],
+    ["PL409", "Invalid status transition: COMPLETED -> COMPLETED", null, 409, "이미 처리된 신청입니다. 목록을 새로고침해 주세요."],
+    ["PL409", "Invalid status transition: APPROVED -> COMPLETED", null, 409, "신청이 이미 '선정' 상태라 이 작업을 할 수 없습니다. 목록을 새로고침해 주세요."],
+    ["PL409", "something unexpected", null, 409, "현재 상태에서는 처리할 수 없습니다."],
+  ];
+  for (const [code, message, details, status, expected] of cases) {
+    reset();
+    tableImpl = adminTables((c) => c.table === "applications" ? jsonRes(200, { party_slots: { store_id: STORE_ID } }) : undefined);
+    rpcImpl = () => jsonRes(400, { code, message, details, hint: null });
+    const res = await call("POST", `/admin/applications/${APP_ID}/complete`, { token: "admin-token" });
+    assertEquals(res.status, status, `${code} ${message}`);
+    assertEquals((await res.json()).message, expected);
+  }
+});
+
 Deno.test("POST /admin/stores/:id/refund maps insufficient balance (PL402) to 402", async () => {
   reset();
   tableImpl = adminTables();
