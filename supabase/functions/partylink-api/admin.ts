@@ -109,6 +109,118 @@ async function listStores(url: URL) {
   }));
 }
 
+const BRN_RE = /^\d{3}-\d{2}-\d{5}$/;
+
+// 점포 body(camelCase) → 컬럼. 사업자번호·점주 계정·잔액은 수정할 수 없음
+function storeColumns(body: Record<string, unknown>, partial: boolean): Record<string, unknown> {
+  const has = (k: string) => body[k] !== undefined;
+  const need = (k: string) => partial ? has(k) : true;
+  const c: Record<string, unknown> = {};
+  if (need("name")) c.name = str(body.name, "점포명", 100, true);
+  if (need("ownerName")) c.owner_name = str(body.ownerName, "대표자명", 50, true);
+  if (need("phone")) {
+    const p = str(body.phone, "연락처", 20, true) as string;
+    if (!/^[0-9-]{9,20}$/.test(p)) throw new HttpError(400, "연락처를 정확히 입력해 주세요. (예: 01012345678)");
+    c.phone = p;
+  }
+  if (need("address")) c.address = str(body.address, "주소", 200, true);
+  if (has("addressDetail")) c.address_detail = str(body.addressDetail, "상세 주소", 200);
+  if (has("region")) c.region = str(body.region, "지역", 50);
+  if (has("instagram")) c.instagram_handle = str(body.instagram, "인스타그램", 50);
+  if (has("defaultFeePerGuest")) c.default_fee_per_guest = int(body.defaultFeePerGuest, "기본 수수료", 0, 10_000_000);
+  if (has("isActive")) {
+    if (typeof body.isActive !== "boolean") throw new HttpError(400, "운영 여부 형식이 올바르지 않습니다.");
+    c.is_active = body.isActive;
+  }
+  return c;
+}
+
+const STORE_SELECT =
+  "id, name, owner_name, phone, address, address_detail, region, prepaid_balance, default_fee_per_guest, is_active, created_at";
+
+// deno-lint-ignore no-explicit-any
+function toStore(s: any) {
+  return {
+    id: s.id, name: s.name, ownerName: s.owner_name, phone: s.phone,
+    address: [s.address, s.address_detail].filter(Boolean).join(" "), region: s.region,
+    prepaidBalance: s.prepaid_balance, defaultFeePerGuest: s.default_fee_per_guest,
+    isActive: s.is_active, createdAt: s.created_at,
+  };
+}
+
+// 점주 계정이 아직 없는 점포도 등록할 수 있게, ownerUserId 를 생략하면 임시 UUID 를 부여
+async function createStore(body: Record<string, unknown>) {
+  const brn = str(body.businessRegNo, "사업자등록번호", 12, true) as string;
+  if (!BRN_RE.test(brn)) throw new HttpError(400, "사업자등록번호 형식이 올바르지 않습니다. (예: 123-45-67890)");
+  if (body.ownerUserId !== undefined && !(typeof body.ownerUserId === "string" && UUID_RE.test(body.ownerUserId))) {
+    throw new HttpError(400, "점주 계정 값이 올바르지 않습니다.");
+  }
+  const owner = (body.ownerUserId as string | undefined) ?? crypto.randomUUID();
+  const cols = storeColumns(body, false);
+  const { data, error } = await db.from("stores")
+    .insert({ ...cols, business_reg_no: brn, owner_user_id: owner }).select(STORE_SELECT).single();
+  if (error) throw fromDbError(error);
+  return toStore(data);
+}
+
+async function updateStore(id: string, body: Record<string, unknown>) {
+  for (const k of ["businessRegNo", "ownerUserId", "prepaidBalance"]) {
+    if (k in body) throw new HttpError(400, "이 항목은 수정할 수 없습니다.");
+  }
+  const cols = storeColumns(body, true);
+  if (Object.keys(cols).length === 0) throw new HttpError(400, "변경할 내용이 없습니다.");
+  const { data, error } = await db.from("stores").update(cols).eq("id", id).select(STORE_SELECT).maybeSingle();
+  if (error) throw fromDbError(error);
+  if (!data) throw new HttpError(404, "대상을 찾을 수 없습니다.");
+  return toStore(data);
+}
+
+// ---------------------------------------------------------------------
+// 대시보드 집계
+// ---------------------------------------------------------------------
+// deno-lint-ignore no-explicit-any
+async function countOf(table: string, filter: (q: any) => any): Promise<number> {
+  const { count, error } = await filter(db.from(table).select("id", { count: "exact", head: true }));
+  if (error) throw fromDbError(error);
+  return count ?? 0;
+}
+
+async function summary() {
+  const now = new Date();
+  const weekEnd = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const [pendingApplications, openParties, partiesThisWeek, blockedGuests, stores] = await Promise.all([
+    countOf("applications", (q) => q.eq("status", "APPLIED")),
+    countOf("party_slots", (q) => q.eq("status", "OPEN")),
+    countOf("party_slots", (q) => q.in("status", ["OPEN", "CLOSED"]).gte("starts_at", now.toISOString()).lte("starts_at", weekEnd.toISOString())),
+    countOf("guests", (q) => q.eq("is_blocked", true)),
+    db.from("stores").select("prepaid_balance, default_fee_per_guest").eq("is_active", true).limit(1000),
+  ]);
+  if (stores.error) throw fromDbError(stores.error);
+  // 잔액이 인당 수수료보다 적으면 다음 승인에서 부족해질 수 있는 점포
+  const lowBalanceStores = (stores.data ?? []).filter((s) => s.prepaid_balance < s.default_fee_per_guest).length;
+  return { pendingApplications, openParties, partiesThisWeek, lowBalanceStores, blockedGuests, asOf: now.toISOString() };
+}
+
+// ---------------------------------------------------------------------
+// 방문 인증 대행 — 신청에 발급된 방문 코드를 입력받아 해당 신청에 대해서만 인증
+// ---------------------------------------------------------------------
+async function verifyVisitFor(applicationId: string, body: Record<string, unknown>) {
+  const code = str(body.code, "방문 코드", 32, true) as string;
+  const { data, error } = await db.from("applications")
+    .select("visit_code, party_slots(store_id)").eq("id", applicationId).maybeSingle();
+  if (error) throw fromDbError(error);
+  // deno-lint-ignore no-explicit-any
+  const row = data as any;
+  const storeId = row?.party_slots?.store_id;
+  if (!row || !storeId) throw new HttpError(404, "대상을 찾을 수 없습니다.");
+  // DB 의 normalize_visit_code 와 같은 규칙으로 비교 (공백·하이픈 제거, 대문자, O→0, I/L→1)
+  const norm = (s: string) => s.replace(/[\s-]/g, "").toUpperCase().replace(/O/g, "0").replace(/[IL]/g, "1");
+  if (!row.visit_code || norm(code) !== norm(row.visit_code)) {
+    throw new HttpError(404, "방문 코드가 일치하지 않습니다.");
+  }
+  return await rpc("verify_visit", { p_store_id: storeId, p_visit_code: code });
+}
+
 async function listDeposits(storeId: string, url: URL) {
   const { data, error } = await db.from("deposit_histories")
     .select("id, application_id, type, amount, balance_before, balance_after, depositor_name, memo, created_at")
@@ -303,16 +415,20 @@ export async function adminRoute(req: Request, path: string): Promise<Result | n
   const url = new URL(req.url);
   const m = req.method;
   const seg = path.split("/").filter(Boolean); // ["stores", ":id", "charge"]
-  const known = ["me", "stores", "parties", "applications", "guests"];
+  const known = ["me", "summary", "stores", "parties", "applications", "guests"];
   if (!known.includes(seg[0] ?? "")) return null;
 
   const adminId = await requireAdmin(req); // 라우트가 존재하더라도 먼저 인증 → 구조 노출 최소화
 
   if (seg[0] === "me" && seg.length === 1 && m === "GET") return ok({ isAdmin: true, userId: adminId });
 
+  if (seg[0] === "summary" && seg.length === 1 && m === "GET") return ok(await summary());
+
   if (seg[0] === "stores") {
     if (seg.length === 1 && m === "GET") return ok(await listStores(url));
+    if (seg.length === 1 && m === "POST") return ok(await createStore(await readJson(req)), 201);
     const id = seg[1] ? requireUuid(seg[1], "점포를 찾을 수 없습니다.") : "";
+    if (seg.length === 2 && m === "PATCH") return ok(await updateStore(id, await readJson(req)));
     if (seg.length === 3 && seg[2] === "deposits" && m === "GET") return ok(await listDeposits(id, url));
     if (seg.length === 3 && seg[2] === "charge" && m === "POST") {
       const b = await readJson(req);
@@ -344,6 +460,7 @@ export async function adminRoute(req: Request, path: string): Promise<Result | n
     if (seg.length === 3 && m === "POST") {
       const appId = requireUuid(seg[1], "대상을 찾을 수 없습니다.");
       const action = seg[2];
+      if (action === "verify-visit") return ok(await verifyVisitFor(appId, await readJson(req)));
       if (["approve", "reject", "complete", "noshow"].includes(action)) {
         const storeId = await storeOfApplication(appId);
         if (action === "approve") return ok(await rpc("approve_application", { p_application_id: appId, p_store_id: storeId }));

@@ -35,6 +35,8 @@ export function fromDbError(e: DbError): HttpError {
       return new HttpError(400, "입력값을 확인해 주세요.", e.code);
     case "23503": // 존재하지 않는 점포 등 FK 위반
       return new HttpError(404, "대상을 찾을 수 없습니다.", e.code);
+    case "23505": // UNIQUE 위반 (사업자등록번호, 점주 계정 중복)
+      return new HttpError(409, "이미 등록된 사업자등록번호 또는 점주 계정입니다.", e.code);
     case "PL402":
       return new HttpError(402, "적립금 잔액이 부족합니다.", e.code, detail);
     case "PL403":
