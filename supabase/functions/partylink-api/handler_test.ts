@@ -336,3 +336,96 @@ Deno.test("GET /admin/applications includes guest contact and rejects bad filter
   assertEquals((await call("GET", "/admin/applications?status=HACK", { token: "admin-token" })).status, 400);
   assertEquals((await call("GET", "/admin/applications?slotId=1", { token: "admin-token" })).status, 400);
 });
+
+// ---------------------------------------------------------------------
+// 관리자 API 보완: 점포 등록·수정, 대시보드 집계, 방문 인증 대행
+// ---------------------------------------------------------------------
+const goodStore = {
+  name: "43번지 혼술바", businessRegNo: "123-45-67890", ownerName: "홍길동", phone: "01012345678",
+  address: "서울 중구 을지로11길 19", region: "명동/을지로", defaultFeePerGuest: 12000,
+};
+const storeRow = {
+  id: STORE_ID, name: "43번지 혼술바", owner_name: "홍길동", phone: "01012345678", address: "서울 중구 을지로11길 19",
+  address_detail: null, region: "명동/을지로", prepaid_balance: 0, default_fee_per_guest: 12000, is_active: true, created_at: "2026-11-09T00:00:00Z",
+};
+
+Deno.test("POST /admin/stores validates input, drops unknown fields, assigns a placeholder owner", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "stores" && c.method === "POST" ? jsonRes(201, storeRow) : undefined);
+  const res = await call("POST", "/admin/stores", { token: "admin-token", body: { ...goodStore, prepaid_balance: 999, id: "evil" } });
+  assertEquals(res.status, 201);
+  const store = await res.json();
+  assertEquals([store.name, store.prepaidBalance, store.defaultFeePerGuest], ["43번지 혼술바", 0, 12000]);
+  const insert = tableCalls.find((c) => c.table === "stores" && c.method === "POST")!;
+  const row = (Array.isArray(insert.body) ? insert.body[0] : insert.body) as Record<string, unknown>;
+  assertEquals(row.business_reg_no, "123-45-67890");
+  assert(typeof row.owner_user_id === "string" && (row.owner_user_id as string).length === 36, "owner placeholder uuid");
+  assert(!("prepaid_balance" in row) && !("id" in row), "balance/id must never be client-controlled");
+
+  tableCalls = [];
+  for (const bad of [{ businessRegNo: "1234567890" }, { name: "" }, { phone: "abc" }, { defaultFeePerGuest: -1 }, { ownerUserId: "x" }]) {
+    const r = await call("POST", "/admin/stores", { token: "admin-token", body: { ...goodStore, ...bad } });
+    assertEquals(r.status, 400, JSON.stringify(bad));
+  }
+  assert(!tableCalls.some((c) => c.table === "stores"), "invalid input must not reach stores");
+});
+
+Deno.test("POST /admin/stores maps a duplicate business number (23505) to 409", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "stores" && c.method === "POST"
+    ? jsonRes(409, { code: "23505", message: "duplicate key value violates unique constraint" }) : undefined);
+  const res = await call("POST", "/admin/stores", { token: "admin-token", body: goodStore });
+  assertEquals(res.status, 409);
+});
+
+Deno.test("PATCH /admin/stores/:id updates only given fields; immutable fields and empty patch rejected", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "stores" && c.method === "PATCH" ? jsonRes(200, { ...storeRow, region: "홍대/마포" }) : undefined);
+  const ok = await call("PATCH", `/admin/stores/${STORE_ID}`, { token: "admin-token", body: { region: "홍대/마포" } });
+  assertEquals(ok.status, 200);
+  assertEquals((await ok.json()).region, "홍대/마포");
+  const patch = tableCalls.find((c) => c.method === "PATCH")!;
+  assertEquals(patch.body, { region: "홍대/마포" });
+  for (const bad of [{}, { businessRegNo: "123-45-67890" }, { ownerUserId: STORE_ID }, { prepaidBalance: 1 }]) {
+    const r = await call("PATCH", `/admin/stores/${STORE_ID}`, { token: "admin-token", body: bad });
+    assertEquals(r.status, 400, JSON.stringify(bad));
+  }
+  tableImpl = adminTables((c) => c.table === "stores" && c.method === "PATCH" ? jsonRes(200, null) : undefined);
+  assertEquals((await call("PATCH", `/admin/stores/${STORE_ID}`, { token: "admin-token", body: { region: "x" } })).status, 404);
+});
+
+Deno.test("GET /admin/summary returns dashboard counts and flags low-balance stores", async () => {
+  reset();
+  const count = (n: number) => new Response("[]", { status: 200, headers: { "Content-Type": "application/json", "Content-Range": `*/${n}` } });
+  tableImpl = adminTables((c) => {
+    if (c.table === "applications") return count(4);
+    if (c.table === "party_slots") return c.params.status === "eq.OPEN" ? count(3) : count(2);
+    if (c.table === "guests") return count(1);
+    if (c.table === "stores") return jsonRes(200, [
+      { prepaid_balance: 5000, default_fee_per_guest: 10000 }, { prepaid_balance: 50000, default_fee_per_guest: 10000 },
+    ]);
+  });
+  const res = await call("GET", "/admin/summary", { token: "admin-token" });
+  assertEquals(res.status, 200);
+  const s = await res.json();
+  assertEquals([s.pendingApplications, s.openParties, s.partiesThisWeek, s.blockedGuests, s.lowBalanceStores], [4, 3, 2, 1, 1]);
+  assertEquals((await call("GET", "/admin/summary")).status, 401);
+});
+
+Deno.test("POST /admin/applications/:id/verify-visit verifies only the code issued to that application", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "applications"
+    ? jsonRes(200, { visit_code: "K7M2ABCD12", party_slots: { store_id: STORE_ID } }) : undefined);
+  rpcImpl = () => jsonRes(200, { application_id: APP_ID, status: "VISITED" });
+  const ok = await call("POST", `/admin/applications/${APP_ID}/verify-visit`, { token: "admin-token", body: { code: "k7m2-abcd-l2" } });
+  assertEquals(ok.status, 200);
+  assertEquals(rpcCalls[0].fn, "verify_visit");
+  assertEquals(rpcCalls[0].args.p_store_id, STORE_ID);
+
+  rpcCalls = [];
+  const wrong = await call("POST", `/admin/applications/${APP_ID}/verify-visit`, { token: "admin-token", body: { code: "ZZZZZZZZZZ" } });
+  assertEquals(wrong.status, 404);
+  const missing = await call("POST", `/admin/applications/${APP_ID}/verify-visit`, { token: "admin-token", body: {} });
+  assertEquals(missing.status, 400);
+  assertEquals(rpcCalls.length, 0, "a mismatching code must never reach verify_visit");
+});

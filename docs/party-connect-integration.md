@@ -141,7 +141,10 @@ SUPABASE_URL과 SUPABASE_SERVICE_ROLE_KEY는 Supabase Edge Function의 서버 �
 | 메서드 | 경로 | 설명 |
 |---|---|---|
 | GET | `/admin/me` | 관리자 여부 확인 (화면 진입 가드용) |
+| GET | `/admin/summary` | 대시보드 집계 (선정 대기 신청, 모집 중 파티, 7일 내 파티, 적립금 부족 점포, 차단 게스트) |
 | GET | `/admin/stores` | 점포 목록 + 적립금 잔액 |
+| POST | `/admin/stores` | 점포 등록 `{ name, businessRegNo, ownerName, phone, address, region?, defaultFeePerGuest?, ownerUserId? }` (`ownerUserId` 생략 시 임시 값 부여, 사업자번호 중복 409) |
+| PATCH | `/admin/stores/:id` | 점포 수정 (사업자번호·점주 계정·잔액은 수정 불가) |
 | GET | `/admin/stores/:id/deposits` | 적립금 원장 |
 | POST | `/admin/stores/:id/charge` | 충전 `{ amount, depositorName, memo? }` |
 | POST | `/admin/stores/:id/refund` | 환불 `{ amount, memo? }` (잔액 부족 시 402) |
@@ -150,6 +153,7 @@ SUPABASE_URL과 SUPABASE_SERVICE_ROLE_KEY는 Supabase Edge Function의 서버 �
 | PATCH | `/admin/parties/:id` | 파티 수정 (상태 변경 포함, 점포 변경 불가) |
 | GET | `/admin/applications?slotId=&status=` | 신청 목록 (게스트 연락처·미션 URL 포함) |
 | POST | `/admin/applications/:id/approve` | 선정 |
+| POST | `/admin/applications/:id/verify-visit` | 방문 인증 대행 `{ code }` (그 신청에 발급된 코드와 일치할 때만, 파티 시간대 안에서만) |
 | POST | `/admin/applications/:id/reject` | 반려 `{ reason? }` |
 | POST | `/admin/applications/:id/complete` | 최종 승인 (수수료 차감) |
 | POST | `/admin/applications/:id/noshow` | 노쇼 처리 (벌점·자동 차단) |
