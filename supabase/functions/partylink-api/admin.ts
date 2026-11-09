@@ -461,6 +461,8 @@ export async function adminRoute(req: Request, path: string): Promise<Result | n
       const appId = requireUuid(seg[1], "대상을 찾을 수 없습니다.");
       const action = seg[2];
       if (action === "verify-visit") return ok(await verifyVisitFor(appId, await readJson(req)));
+      // 미션 보완 요청: MISSION_SUBMITTED → VISITED (게스트가 같은 신청에 다시 제출)
+      if (action === "request-revision") return ok(await rpc("request_mission_revision", { p_application_id: appId }));
       if (["approve", "reject", "complete", "noshow"].includes(action)) {
         const storeId = await storeOfApplication(appId);
         if (action === "approve") return ok(await rpc("approve_application", { p_application_id: appId, p_store_id: storeId }));
