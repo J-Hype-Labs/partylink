@@ -155,7 +155,15 @@ async function createStore(body: Record<string, unknown>) {
   if (body.ownerUserId !== undefined && !(typeof body.ownerUserId === "string" && UUID_RE.test(body.ownerUserId))) {
     throw new HttpError(400, "점주 계정 값이 올바르지 않습니다.");
   }
-  const owner = (body.ownerUserId as string | undefined) ?? crypto.randomUUID();
+  // 점주 로그인은 MVP 범위 밖이라 생략을 허용한다 (임의 UUID = 아직 연결된 점주 계정이 없다는 표시).
+  // 값을 주면 실제 로그인 계정인지 확인한다. 존재하지 않는 계정이 점주로 묶이는 것을 막는다.
+  let owner: string = crypto.randomUUID();
+  if (body.ownerUserId !== undefined) {
+    owner = body.ownerUserId as string;
+    const { data: u, error: uErr } = await db.auth.admin.getUserById(owner);
+    if (uErr && uErr.status !== 404) throw uErr;
+    if (uErr || !u?.user) throw new HttpError(400, "점주 계정을 찾을 수 없습니다. 로그인한 적이 있는 계정의 ID인지 확인해 주세요.");
+  }
   const cols = storeColumns(body, false);
   const { data, error } = await db.from("stores")
     .insert({ ...cols, business_reg_no: brn, owner_user_id: owner }).select(STORE_SELECT).single();
@@ -188,16 +196,21 @@ async function countOf(table: string, filter: (q: any) => any): Promise<number> 
 async function summary() {
   const now = new Date();
   const weekEnd = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-  const [pendingApplications, openParties, partiesThisWeek, blockedGuests, stores] = await Promise.all([
+  const [pendingApplications, openParties, partiesThisWeek, blockedGuests, stores, upcoming] = await Promise.all([
     countOf("applications", (q) => q.eq("status", "APPLIED")),
     countOf("party_slots", (q) => q.eq("status", "OPEN")),
     countOf("party_slots", (q) => q.in("status", ["OPEN", "CLOSED"]).gte("starts_at", now.toISOString()).lte("starts_at", weekEnd.toISOString())),
     countOf("guests", (q) => q.eq("is_blocked", true)),
-    db.from("stores").select("prepaid_balance, default_fee_per_guest").eq("is_active", true).limit(1000),
+    db.from("stores").select("id, prepaid_balance").eq("is_active", true).limit(1000),
+    db.from("party_slots").select("store_id, fee_per_guest").in("status", ["OPEN", "CLOSED"]).gte("starts_at", now.toISOString()).limit(5000),
   ]);
   if (stores.error) throw fromDbError(stores.error);
-  // 잔액이 인당 수수료보다 적으면 다음 승인에서 부족해질 수 있는 점포
-  const lowBalanceStores = (stores.data ?? []).filter((s) => s.prepaid_balance < s.default_fee_per_guest).length;
+  if (upcoming.error) throw fromDbError(upcoming.error);
+  // 다가오는 파티(모집 중·마감)의 인당 수수료 중 가장 큰 값보다 잔액이 적으면, 다음 최종 승인에서 부족해질 수 있다.
+  // 점포 기본 수수료가 아니라 실제 파티 수수료 기준이며, 다가오는 파티가 없는 점포는 세지 않는다.
+  const maxFee = new Map<string, number>();
+  for (const s of upcoming.data ?? []) maxFee.set(s.store_id, Math.max(maxFee.get(s.store_id) ?? 0, s.fee_per_guest ?? 0));
+  const lowBalanceStores = (stores.data ?? []).filter((s) => s.prepaid_balance < (maxFee.get(s.id) ?? 0)).length;
   return { pendingApplications, openParties, partiesThisWeek, lowBalanceStores, blockedGuests, asOf: now.toISOString() };
 }
 
@@ -324,13 +337,57 @@ async function createParty(body: Record<string, unknown>) {
   return toParty(data as unknown as SlotRow);
 }
 
+// 파티 상태 전이 (CANCELLED / FINISHED 는 최종 상태라 되살릴 수 없다)
+const SLOT_NEXT: Record<string, string[]> = {
+  DRAFT: ["OPEN", "CANCELLED"],
+  OPEN: ["CLOSED", "CANCELLED"],
+  CLOSED: ["OPEN", "FINISHED", "CANCELLED"],
+};
+const SLOT_KO: Record<string, string> = {
+  DRAFT: "작성 중", OPEN: "모집 중", CLOSED: "모집 마감", CANCELLED: "취소", FINISHED: "종료",
+};
+
 async function updateParty(id: string, body: Record<string, unknown>) {
   if ("storeId" in body) throw new HttpError(400, "파티의 점포는 변경할 수 없습니다.");
   const cols = slotColumns(body, true);
   if (Object.keys(cols).length === 0) throw new HttpError(400, "변경할 내용이 없습니다.");
-  const { data, error } = await db.from("party_slots").update(cols).eq("id", id).select(SLOT_SELECT).maybeSingle();
+
+  // 상태·정원을 바꿀 때만 현재 값을 읽어 검증한다 (DB 에는 이 규칙을 강제하는 트리거가 없다)
+  let guardStatus: string | null = null;
+  if (cols.status !== undefined || cols.capacity !== undefined) {
+    const { data: cur, error: curErr } = await db.from("party_slots")
+      .select("status, capacity, applications(status)").eq("id", id).maybeSingle();
+    if (curErr) throw fromDbError(curErr);
+    // deno-lint-ignore no-explicit-any
+    const row = cur as any;
+    if (!row) throw new HttpError(404, "대상을 찾을 수 없습니다.");
+
+    if (cols.status !== undefined && cols.status !== row.status) {
+      if (!(SLOT_NEXT[row.status] ?? []).includes(cols.status as string)) {
+        throw new HttpError(
+          409,
+          `파티가 '${SLOT_KO[row.status] ?? row.status}' 상태라 '${SLOT_KO[cols.status as string] ?? cols.status}'(으)로 바꿀 수 없습니다.`,
+          "PL409",
+        );
+      }
+      guardStatus = row.status; // 읽은 뒤 다른 곳에서 바뀌었다면 갱신이 적용되지 않도록 조건을 건다
+    }
+    if (cols.capacity !== undefined) {
+      const taken = ((row.applications ?? []) as { status: string }[]).filter((a) => TAKEN.includes(a.status)).length;
+      if ((cols.capacity as number) < taken) {
+        throw new HttpError(409, `이미 ${taken}명이 선정되어 있어 정원을 ${taken}명보다 적게 줄일 수 없습니다.`, "PL409");
+      }
+    }
+  }
+
+  let q = db.from("party_slots").update(cols).eq("id", id);
+  if (guardStatus) q = q.eq("status", guardStatus);
+  const { data, error } = await q.select(SLOT_SELECT).maybeSingle();
   if (error) throw fromDbError(error);
-  if (!data) throw new HttpError(404, "대상을 찾을 수 없습니다.");
+  if (!data) {
+    if (guardStatus) throw new HttpError(409, "다른 곳에서 먼저 파티 상태가 바뀌었습니다. 목록을 새로고침해 주세요.", "PL409");
+    throw new HttpError(404, "대상을 찾을 수 없습니다.");
+  }
   return toParty(data as unknown as SlotRow);
 }
 

@@ -18,6 +18,10 @@ export class HttpError extends Error {
 
 type DbError = { code?: string; message?: string; details?: string };
 
+const SLOT_STATUS_KO: Record<string, string> = {
+  DRAFT: "작성 중", OPEN: "모집 중", CLOSED: "모집 마감", CANCELLED: "취소", FINISHED: "종료",
+};
+
 const STATUS_KO: Record<string, string> = {
   APPLIED: "신청", APPROVED: "선정", VISITED: "방문 인증", MISSION_SUBMITTED: "미션 제출",
   COMPLETED: "완료", NOSHOW: "노쇼", REJECTED: "반려", CANCELLED: "취소",
@@ -74,8 +78,17 @@ export function fromDbError(e: DbError): HttpError {
       if (/phone number is already/i.test(msg)) return new HttpError(409, "이미 다른 계정에 등록된 연락처입니다.", e.code);
       return new HttpError(409, transitionMessage(msg), e.code);
     case "PL410":
-      if (/cancel/i.test(msg)) return new HttpError(410, "파티가 시작된 후에는 취소할 수 없습니다.", e.code);
+      // 정확한 문구로만 매칭한다: "Slot x is CANCELLED"(취소된 파티 선정 시도)에도 cancel 이 들어 있다
+      if (/Cannot cancel after the party starts/i.test(msg)) return new HttpError(410, "파티가 시작된 후에는 취소할 수 없습니다.", e.code);
       if (/party window/i.test(msg)) return new HttpError(410, "방문 인증은 파티 진행 시간에만 할 수 있습니다.", e.code);
+      if (/No-show can only be marked/i.test(msg)) return new HttpError(410, "파티가 시작된 후에만 노쇼 처리할 수 있습니다.", e.code);
+      if (/is full/i.test(msg)) return new HttpError(410, "정원이 가득 차 더 선정할 수 없습니다. 정원을 늘리거나 다른 신청을 반려해 주세요.", e.code);
+      {
+        const m = msg.match(/^Slot \S+ is ([A-Z]+)$/);
+        if (m && SLOT_STATUS_KO[m[1]]) {
+          return new HttpError(410, `이 파티는 '${SLOT_STATUS_KO[m[1]]}' 상태라 신청을 선정할 수 없습니다.`, e.code);
+        }
+      }
       return new HttpError(410, "모집이 마감되었거나 정원이 찼습니다.", e.code);
     case "PL423":
       return new HttpError(423, "노쇼 누적 등으로 신청이 제한된 계정입니다.", e.code, detail);

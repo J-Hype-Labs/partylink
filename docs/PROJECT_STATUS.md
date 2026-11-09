@@ -45,10 +45,13 @@
 ### 사용자 승인 대기 (프로덕션 변경: 제가 직접 하지 않음)
 | 항목 | 내용 |
 |---|---|
-| `partylink-api` 재배포 | partylink PR #8(`GET /applications`에 `missionUrl·approvedAt·visitedAt`)과 관리자 오류 메시지 개선 PR이 병합되면 **재배포해야** 서비스에 반영됨. 배포 전에는 프런트가 새 필드를 못 받지만, 없으면 숨기는 구조라 동작에는 문제 없음 |
+| `partylink-api` 재배포 | partylink PR #8(`GET /applications`에 `missionUrl·approvedAt·visitedAt`), #9(관리자 오류 메시지), 서버 검증 강화 PR(파티 상태 전이·정원, 점주 계정 확인, 잔액 부족 집계 정정)이 병합돼 있어 **한 번에 재배포**하면 됨(마이그레이션 없음). 배포 전에는 프런트가 새 필드를 못 받지만, 없으면 숨기는 구조라 동작에는 문제 없음 |
+| `ALLOWED_ORIGINS` 정리 | 현재 설정은 정상(허용 출처만 CORS 허용, 그 외 거부 확인). 다만 `http://localhost:3000`이 허용 목록에 있음 → 출시 전에 제거 권장(`supabase secrets set ALLOWED_ORIGINS=https://j-hype-labs.github.io`). 프로덕션 환경변수 변경이라 승인 후 |
 
 ### 보류 (후속 과제)
 - **보완 사유(`revisionNote`)**: 이번 MVP에서는 제외. 마이그레이션(컬럼 + `request_mission_revision` 사유 인자 + `guest_applications` 반환)과 재배포가 필요하고, 사유는 관리자가 수동 안내로 대체 가능. 프런트는 `status==='VISITED' && missionUrl`이면 "보완 요청됨" 문구만 표시.
+- **관리 행위 감사 로그**: 차단·선정·반려·노쇼를 누가 했는지 남기지 않음(최종 승인만 `deposit_histories.created_by`에 남음). 관리자가 1명인 MVP에서는 제외, 관리자가 늘어나기 전에 별도 로그 테이블 설계.
+- **점주 계정 연결**: 점포 등록 시 `ownerUserId`를 생략하면 임의 UUID가 들어가며 "연결된 점주 계정 없음"을 뜻함(점주 로그인이 MVP 범위 밖). 값을 주면 실제 로그인 계정인지 확인함. 나중에 점주를 연결하려면 SQL로 `stores.owner_user_id`를 바꿔야 함(PATCH는 변경 불가).
 - **수수료 집계 서버화**: 지금은 화면이 최근 500건에서 집계. 신청이 500건을 넘으면 서버 집계 엔드포인트가 필요(`docs/settlement-check.md`의 SQL로 원장과 교차 검증 가능).
 
 ### 알려진 한계 (지금 DB에 파티가 0개)
