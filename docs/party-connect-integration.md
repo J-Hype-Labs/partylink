@@ -134,6 +134,36 @@ SUPABASE_URL과 SUPABASE_SERVICE_ROLE_KEY는 Supabase Edge Function의 서버 �
 
 브라우저 설정에는 Supabase Project URL과 공개용 publishable/anon key만 둔다. service_role, Kakao Client Secret, 관리자 비밀번호는 절대 넣지 않는다.
 
+### 관리자 API
+
+`/functions/v1/partylink-api/admin/...` — 모든 경로가 **카카오 로그인 토큰 + `admins` 테이블 등록**을 요구합니다. (미로그인 401, 관리자 아님 403)
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| GET | `/admin/me` | 관리자 여부 확인 (화면 진입 가드용) |
+| GET | `/admin/stores` | 점포 목록 + 적립금 잔액 |
+| GET | `/admin/stores/:id/deposits` | 적립금 원장 |
+| POST | `/admin/stores/:id/charge` | 충전 `{ amount, depositorName, memo? }` |
+| POST | `/admin/stores/:id/refund` | 환불 `{ amount, memo? }` (잔액 부족 시 402) |
+| GET | `/admin/parties?status=` | 파티 목록 (모든 상태, 선정/신청 인원 포함) |
+| POST | `/admin/parties` | 파티 등록 `{ storeId, title, benefit, startsAt, endsAt, recruitDeadline, capacity, ... }` |
+| PATCH | `/admin/parties/:id` | 파티 수정 (상태 변경 포함, 점포 변경 불가) |
+| GET | `/admin/applications?slotId=&status=` | 신청 목록 (게스트 연락처·미션 URL 포함) |
+| POST | `/admin/applications/:id/approve` | 선정 |
+| POST | `/admin/applications/:id/reject` | 반려 `{ reason? }` |
+| POST | `/admin/applications/:id/complete` | 최종 승인 (수수료 차감) |
+| POST | `/admin/applications/:id/noshow` | 노쇼 처리 (벌점·자동 차단) |
+| GET | `/admin/guests?blocked=1` | 게스트 목록 |
+| POST | `/admin/guests/:id/block` | 수동 차단/해제 `{ blocked: boolean }` |
+
+목록은 `?limit=`(기본 100, 최대 500)을 받습니다. 선정/반려/승인/노쇼는 점주 대신 처리하는 것이라, 점포 id는 서버가 신청에서 조회합니다.
+
+관리자 등록: 마이그레이션 `20261107000000_admin_api.sql`을 적용한 뒤, 관리자가 웹에서 카카오 로그인을 한 번 한 다음 Supabase 대시보드 → Authentication → Users에서 User UID를 확인해 등록합니다.
+
+```sql
+INSERT INTO admins (user_id, note) VALUES ('<auth.users.id>', '대표');
+```
+
 ## 9. 운영 테스트
 
 - [ ] 실제 Kakao 테스트 계정 로그인
@@ -166,7 +196,7 @@ PartyLink는 Kakao 계정 인증과 파티 신청 데이터를 처리한다. 회
 - [ ] 프런트엔드 설정 및 production demo 차단
 - [ ] 회원 동의 이력 저장 기능
 - [ ] 실제 OAuth 및 신청 통합 테스트
-- [ ] 관리자 인증을 서버 측 권한으로 전환
+- [ ] 관리자 인증을 서버 측 권한으로 전환 (서버 API는 `/admin/*`로 구현됨, 관리자 화면 연동은 남음)
 - [ ] 운영 적용 승인
 
 관련 공식 문서:

@@ -6,6 +6,7 @@
 //   POST /partylink-api/applications              파티 신청           (카카오 로그인 필요)
 //        body: { slotId, name, phone, agree }
 //   POST /partylink-api/applications/:id/cancel   신청 취소           (카카오 로그인 필요)
+//   *    /partylink-api/admin/...                 관리자 API          (admins 테이블 등록 계정만, admin.ts)
 //
 // 보안 원칙
 //   * 사용자는 Authorization: Bearer <access_token> 으로만 식별 (auth.getUser 로 서버에서 검증)
@@ -16,10 +17,10 @@
 // 배포: supabase functions deploy partylink-api --no-verify-jwt
 //   (공개 목록 조회를 위해 게이트웨이 JWT 검사는 끄고, 로그인이 필요한 경로는 아래에서 직접 검증)
 // =====================================================================
-import { createClient, type User } from "npm:@supabase/supabase-js@2.45.4";
+import type { User } from "npm:@supabase/supabase-js@2.45.4";
+import { db, fromDbError, HttpError, readJson, requireUser, rpc, UUID_RE } from "./common.ts";
+import { adminRoute } from "./admin.ts";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 // 쉼표로 구분한 허용 Origin. 비우면 모든 Origin 허용 (개발용)
 //   예: https://j-hype-labs.github.io,http://localhost:3000
 const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "")
@@ -27,79 +28,20 @@ const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
-
 const DEFAULT_PARTY_IMAGE =
   "https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=600&q=80";
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const weekdayFmt = new Intl.DateTimeFormat("ko-KR", { weekday: "short", timeZone: "Asia/Seoul" });
 const weekday = (iso: string) => weekdayFmt.format(new Date(iso)); // "월" ~ "일"
 
 // ---------------------------------------------------------------------
-// 에러 처리
+// CORS / 응답
 // ---------------------------------------------------------------------
-class HttpError extends Error {
-  constructor(public status: number, message: string, public code?: string, public detail?: unknown) {
-    super(message);
-  }
-}
-
-type DbError = { code?: string; message?: string; details?: string };
-
-function fromDbError(e: DbError): HttpError {
-  const msg = e.message ?? "";
-  let detail: unknown = e.details;
-  try { detail = JSON.parse(e.details ?? ""); } catch { /* plain text */ }
-
-  switch (e.code) {
-    case "PL400":
-      if (/phone/i.test(msg)) return new HttpError(400, "연락처를 정확히 입력해 주세요. (예: 01012345678)", e.code);
-      if (/name/i.test(msg)) return new HttpError(400, "이름을 2자 이상 입력해 주세요.", e.code);
-      return new HttpError(400, "입력값을 확인해 주세요.", e.code);
-    case "PL403":
-      return new HttpError(403, "권한이 없습니다.", e.code);
-    case "PL404":
-      return new HttpError(404, "대상을 찾을 수 없습니다.", e.code);
-    case "PL409":
-      if (/already applied/i.test(msg)) return new HttpError(409, "이미 신청한 파티입니다.", e.code);
-      if (/phone number is already/i.test(msg)) return new HttpError(409, "이미 다른 계정에 등록된 연락처입니다.", e.code);
-      return new HttpError(409, "현재 상태에서는 처리할 수 없습니다.", e.code);
-    case "PL410":
-      if (/cancel/i.test(msg)) return new HttpError(410, "파티가 시작된 후에는 취소할 수 없습니다.", e.code);
-      return new HttpError(410, "모집이 마감되었거나 정원이 찼습니다.", e.code);
-    case "PL423":
-      return new HttpError(423, "노쇼 누적 등으로 신청이 제한된 계정입니다.", e.code, detail);
-    default:
-      console.error("Unexpected DB error", e);
-      return new HttpError(500, "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
-  }
-}
-
-async function rpc<T>(fn: string, args: Record<string, unknown> = {}): Promise<T> {
-  const { data, error } = await admin.rpc(fn, args);
-  if (error) throw fromDbError(error);
-  return data as T;
-}
-
-// ---------------------------------------------------------------------
-// 인증 / CORS / 응답
-// ---------------------------------------------------------------------
-async function requireUser(req: Request): Promise<User> {
-  const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
-  if (!token) throw new HttpError(401, "카카오 로그인이 필요합니다.");
-  const { data, error } = await admin.auth.getUser(token);
-  if (error || !data.user) throw new HttpError(401, "로그인이 만료되었습니다. 다시 로그인해 주세요.");
-  return data.user;
-}
-
 function corsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get("Origin") ?? "";
   const allow = ALLOWED_ORIGINS.length === 0 ? "*" : ALLOWED_ORIGINS.includes(origin) ? origin : "";
   const headers: Record<string, string> = {
     "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
     "Vary": "Origin",
   };
   if (allow) headers["Access-Control-Allow-Origin"] = allow;
@@ -113,14 +55,6 @@ function json(req: Request, status: number, body: unknown): Response {
   });
 }
 
-async function readJson(req: Request): Promise<Record<string, unknown>> {
-  try {
-    const body = await req.json();
-    return body && typeof body === "object" ? body as Record<string, unknown> : {};
-  } catch {
-    throw new HttpError(400, "요청 형식이 올바르지 않습니다.");
-  }
-}
 
 // ---------------------------------------------------------------------
 // 핸들러
@@ -208,7 +142,7 @@ async function apply(user: User, body: Record<string, unknown>) {
 
 async function cancel(user: User, applicationId: string) {
   if (!UUID_RE.test(applicationId)) throw new HttpError(404, "대상을 찾을 수 없습니다.");
-  const { data: guest, error } = await admin.from("guests").select("id").eq("user_id", user.id).maybeSingle();
+  const { data: guest, error } = await db.from("guests").select("id").eq("user_id", user.id).maybeSingle();
   if (error) throw fromDbError(error);
   if (!guest) throw new HttpError(404, "대상을 찾을 수 없습니다.");
   return await rpc("cancel_application", { p_application_id: applicationId, p_guest_id: guest.id });
@@ -222,6 +156,11 @@ export async function handler(req: Request): Promise<Response> {
 
   const path = new URL(req.url).pathname.replace(/^.*?\/partylink-api/, "").replace(/\/+$/, "") || "/";
   try {
+    if (path === "/admin" || path.startsWith("/admin/")) {
+      const r = await adminRoute(req, path.slice("/admin".length) || "/");
+      if (r) return json(req, r.status, r.body);
+      throw new HttpError(404, "Not found");
+    }
     if (path === "/parties" && req.method === "GET") {
       return json(req, 200, await listParties());
     }

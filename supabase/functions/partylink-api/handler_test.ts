@@ -9,6 +9,10 @@ Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "service-role-test-key");
 type Call = { fn: string; args: Record<string, unknown> };
 let rpcCalls: Call[] = [];
 let rpcImpl: (fn: string, args: Record<string, unknown>) => Response = () => new Response("[]");
+type TableCall = { table: string; method: string; params: Record<string, string>; body?: unknown };
+let tableCalls: TableCall[] = [];
+let tableImpl: ((c: TableCall) => Response | undefined) | null = null;
+const ADMIN_USER = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", email: "admin@example.com", aud: "authenticated", role: "authenticated" };
 const USER = { id: "11111111-1111-4111-8111-111111111111", email: "kakao@example.com", aud: "authenticated", role: "authenticated" };
 const GUEST_ID = "22222222-2222-4222-8222-222222222222";
 const SLOT_ID = "33333333-3333-4333-8333-333333333333";
@@ -21,8 +25,9 @@ globalThis.fetch = (async (input: Request | URL | string, init?: RequestInit) =>
   const req = new Request(input, init);
   const u = new URL(req.url);
   if (u.pathname === "/auth/v1/user") {
-    return req.headers.get("Authorization") === "Bearer good-token"
-      ? jsonRes(200, USER)
+    const auth = req.headers.get("Authorization");
+    return auth === "Bearer good-token" ? jsonRes(200, USER)
+      : auth === "Bearer admin-token" ? jsonRes(200, ADMIN_USER)
       : jsonRes(401, { code: 401, msg: "invalid JWT" });
   }
   if (u.pathname.startsWith("/rest/v1/rpc/")) {
@@ -30,6 +35,16 @@ globalThis.fetch = (async (input: Request | URL | string, init?: RequestInit) =>
     const args = JSON.parse((await req.text()) || "{}");
     rpcCalls.push({ fn, args });
     return rpcImpl(fn, args);
+  }
+  if (u.pathname.startsWith("/rest/v1/") && tableImpl) {
+    const text = await req.text();
+    const c: TableCall = {
+      table: u.pathname.slice("/rest/v1/".length), method: req.method,
+      params: Object.fromEntries(u.searchParams), body: text ? JSON.parse(text) : undefined,
+    };
+    tableCalls.push(c);
+    const r = tableImpl(c);
+    if (r) return r;
   }
   if (u.pathname === "/rest/v1/guests") {
     return u.searchParams.get("user_id") === `eq.${USER.id}` ? jsonRes(200, [{ id: GUEST_ID }]) : jsonRes(200, []);
@@ -50,7 +65,7 @@ const call = (method: string, path: string, opts: { token?: string; body?: unkno
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   }));
 
-const reset = () => { rpcCalls = []; rpcImpl = () => jsonRes(200, []); };
+const reset = () => { rpcCalls = []; rpcImpl = () => jsonRes(200, []); tableCalls = []; tableImpl = null; };
 
 Deno.test("GET /parties maps DB rows to the web card shape (KST weekday, default image)", async () => {
   reset();
@@ -165,4 +180,159 @@ Deno.test("CORS preflight and unknown routes", async () => {
   assert((pre.headers.get("Access-Control-Allow-Headers") ?? "").includes("authorization"));
   assertEquals((await call("GET", "/nope")).status, 404);
   assertEquals((await call("DELETE", "/parties")).status, 404);
+});
+
+// ---------------------------------------------------------------------
+// 관리자 API
+// ---------------------------------------------------------------------
+const STORE_ID = "55555555-5555-4555-8555-555555555555";
+const APP_ID = "44444444-4444-4444-8444-444444444444";
+const adminTables = (extra?: (c: TableCall) => Response | undefined) => (c: TableCall) =>
+  c.table === "admins"
+    ? jsonRes(200, c.params.user_id === `eq.${ADMIN_USER.id}` ? [{ user_id: ADMIN_USER.id }] : [])
+    : extra?.(c);
+
+Deno.test("admin routes: 401 without token, 403 for non-admin users, DB untouched", async () => {
+  reset();
+  tableImpl = adminTables();
+  assertEquals((await call("GET", "/admin/stores")).status, 401);
+  assertEquals((await call("GET", "/admin/stores", { token: "forged" })).status, 401);
+  const res = await call("POST", `/admin/stores/${STORE_ID}/charge`, { token: "good-token", body: { amount: 1000, depositorName: "x" } });
+  assertEquals(res.status, 403);
+  assertEquals(rpcCalls.length, 0);
+  assert(tableCalls.every((c) => c.table === "admins"), "non-admin must not reach other tables");
+  assertEquals((await call("GET", "/admin/nope", { token: "admin-token" })).status, 404);
+});
+
+Deno.test("GET /admin/me confirms the admin from the token", async () => {
+  reset();
+  tableImpl = adminTables();
+  const res = await call("GET", "/admin/me", { token: "admin-token" });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { isAdmin: true, userId: ADMIN_USER.id });
+});
+
+Deno.test("POST /admin/stores/:id/charge passes the admin id from the token, validates amount", async () => {
+  reset();
+  tableImpl = adminTables();
+  rpcImpl = () => jsonRes(200, { balance_after: 300000 });
+  const res = await call("POST", `/admin/stores/${STORE_ID}/charge`, {
+    token: "admin-token",
+    body: { amount: 300000, depositorName: " 홍길동 ", memo: "11/6 입금", adminId: "evil" },
+  });
+  assertEquals(res.status, 200);
+  assertEquals(rpcCalls, [{ fn: "charge_deposit", args: {
+    p_store_id: STORE_ID, p_amount: 300000, p_depositor_name: "홍길동", p_admin_user_id: ADMIN_USER.id, p_memo: "11/6 입금",
+  } }]);
+
+  rpcCalls = [];
+  for (const body of [{ amount: -1, depositorName: "a" }, { amount: 1.5, depositorName: "a" }, { amount: "abc", depositorName: "a" }, { amount: 1000 }]) {
+    assertEquals((await call("POST", `/admin/stores/${STORE_ID}/charge`, { token: "admin-token", body })).status, 400);
+  }
+  assertEquals(rpcCalls.length, 0);
+});
+
+Deno.test("POST /admin/stores/:id/refund maps insufficient balance (PL402) to 402", async () => {
+  reset();
+  tableImpl = adminTables();
+  rpcImpl = () => jsonRes(400, { code: "PL402", message: "Insufficient", details: JSON.stringify({ balance: 100 }) });
+  const res = await call("POST", `/admin/stores/${STORE_ID}/refund`, { token: "admin-token", body: { amount: 5000 } });
+  assertEquals(res.status, 402);
+  assertEquals((await res.json()).message, "적립금 잔액이 부족합니다.");
+});
+
+Deno.test("POST /admin/applications/:id/approve resolves the store server-side", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "applications" ? jsonRes(200, { party_slots: { store_id: STORE_ID } }) : undefined);
+  rpcImpl = () => jsonRes(200, { status: "APPROVED" });
+  const res = await call("POST", `/admin/applications/${APP_ID}/approve`, { token: "admin-token", body: { storeId: "evil" } });
+  assertEquals(res.status, 200);
+  assertEquals(rpcCalls, [{ fn: "approve_application", args: { p_application_id: APP_ID, p_store_id: STORE_ID } }]);
+
+  rpcCalls = [];
+  await call("POST", `/admin/applications/${APP_ID}/complete`, { token: "admin-token" });
+  assertEquals(rpcCalls, [{ fn: "complete_application", args: { p_application_id: APP_ID, p_store_id: STORE_ID, p_actor_user_id: ADMIN_USER.id } }]);
+
+  rpcCalls = [];
+  await call("POST", `/admin/applications/${APP_ID}/reject`, { token: "admin-token", body: { reason: "조건 불충족" } });
+  assertEquals(rpcCalls, [{ fn: "reject_application", args: { p_application_id: APP_ID, p_store_id: STORE_ID, p_reason: "조건 불충족" } }]);
+});
+
+Deno.test("admin application actions return 404 when the application does not exist", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "applications" ? jsonRes(200, []) : undefined);
+  const res = await call("POST", `/admin/applications/${APP_ID}/approve`, { token: "admin-token" });
+  assertEquals(res.status, 404);
+  assertEquals(rpcCalls.length, 0);
+});
+
+Deno.test("POST /admin/parties validates input and inserts only whitelisted columns", async () => {
+  reset();
+  const good = {
+    storeId: STORE_ID, title: "금요 혼술", benefit: "하이볼 2잔", capacity: 6, category: "혼술바", status: "OPEN",
+    startsAt: "2026-11-13T10:00:00Z", endsAt: "2026-11-13T13:00:00Z", recruitDeadline: "2026-11-12T14:59:00Z",
+    images: ["https://x/y.jpg"], badges: ["NEW"], isFeatured: false, id: "evil", prepaid_balance: 1,
+  };
+  tableImpl = adminTables((c) => c.table === "party_slots" && c.method === "POST"
+    ? jsonRes(201, { id: SLOT_ID, store_id: STORE_ID, title: "금요 혼술", benefit: "하이볼 2잔", status: "OPEN", capacity: 6,
+        images: [], badges: [], is_featured: false, fee_per_guest: 10000, stores: { name: "43번지", region: "명동/을지로" },
+        applications: [{ status: "APPROVED" }, { status: "APPLIED" }, { status: "REJECTED" }] })
+    : undefined);
+  const res = await call("POST", "/admin/parties", { token: "admin-token", body: good });
+  assertEquals(res.status, 201);
+  const party = await res.json();
+  assertEquals([party.selectedCount, party.applicantCount, party.storeName, party.feePerGuest], [1, 2, "43번지", 10000]);
+  const insert = tableCalls.find((c) => c.table === "party_slots" && c.method === "POST")!;
+  const row = (Array.isArray(insert.body) ? insert.body[0] : insert.body) as Record<string, unknown>;
+  assertEquals(row.store_id, STORE_ID);
+  assertEquals(row.capacity, 6);
+  assert(!("id" in row) && !("prepaid_balance" in row), "unknown fields must be dropped");
+
+  tableCalls = [];
+  for (const patch of [{ title: "" }, { capacity: 0 }, { startsAt: "not-a-date" }, { category: "해킹" }, { status: "COMPLETED" }, { storeId: "x" }]) {
+    const r = await call("POST", "/admin/parties", { token: "admin-token", body: { ...good, ...patch } });
+    assert(r.status === 400 || r.status === 404, `${JSON.stringify(patch)} -> ${r.status}`);
+  }
+  const closed = await call("POST", "/admin/parties", { token: "admin-token", body: { ...good, status: "FINISHED" } });
+  assertEquals(closed.status, 400);
+  assert(!tableCalls.some((c) => c.table === "party_slots"), "invalid input must not reach party_slots");
+});
+
+Deno.test("PATCH /admin/parties/:id updates only given fields; empty / storeId patch rejected", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "party_slots" && c.method === "PATCH"
+    ? jsonRes(200, { id: SLOT_ID, store_id: STORE_ID, status: "CLOSED", images: [], badges: [], applications: [] })
+    : undefined);
+  const res = await call("PATCH", `/admin/parties/${SLOT_ID}`, { token: "admin-token", body: { status: "CLOSED", id: "evil" } });
+  assertEquals(res.status, 200);
+  const patch = tableCalls.find((c) => c.method === "PATCH")!;
+  assertEquals(patch.body, { status: "CLOSED" });
+  assertEquals(patch.params.id, `eq.${SLOT_ID}`);
+  assertEquals((await call("PATCH", `/admin/parties/${SLOT_ID}`, { token: "admin-token", body: {} })).status, 400);
+  assertEquals((await call("PATCH", `/admin/parties/${SLOT_ID}`, { token: "admin-token", body: { storeId: STORE_ID } })).status, 400);
+});
+
+Deno.test("POST /admin/guests/:id/block toggles manual block and clears auto-block on release", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "guests" && c.method === "PATCH"
+    ? jsonRes(200, { id: GUEST_ID, is_blocked: false, blocked_until: null }) : undefined);
+  const res = await call("POST", `/admin/guests/${GUEST_ID}/block`, { token: "admin-token", body: { blocked: false } });
+  assertEquals(res.status, 200);
+  assertEquals(tableCalls.find((c) => c.method === "PATCH")!.body, { is_blocked: false, blocked_until: null });
+  assertEquals((await call("POST", `/admin/guests/${GUEST_ID}/block`, { token: "admin-token", body: { blocked: "yes" } })).status, 400);
+});
+
+Deno.test("GET /admin/applications includes guest contact and rejects bad filters", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "applications" ? jsonRes(200, [{
+    id: APP_ID, slot_id: SLOT_ID, status: "MISSION_SUBMITTED", visit_code: "K7M2", mission_url: "https://instagram.com/p/x",
+    fee_amount: 10000, guests: { id: GUEST_ID, name: "홍길동", phone: "01012345678", noshow_count: 0, penalty_count: 0, is_blocked: false },
+    party_slots: { title: "금요 혼술", starts_at: "2026-11-13T10:00:00Z", store_id: STORE_ID, stores: { name: "43번지" } },
+  }]) : undefined);
+  const res = await call("GET", `/admin/applications?slotId=${SLOT_ID}&status=MISSION_SUBMITTED`, { token: "admin-token" });
+  assertEquals(res.status, 200);
+  const [a] = await res.json();
+  assertEquals([a.guest.phone, a.storeName, a.status, a.missionUrl], ["01012345678", "43번지", "MISSION_SUBMITTED", "https://instagram.com/p/x"]);
+  assertEquals((await call("GET", "/admin/applications?status=HACK", { token: "admin-token" })).status, 400);
+  assertEquals((await call("GET", "/admin/applications?slotId=1", { token: "admin-token" })).status, 400);
 });
