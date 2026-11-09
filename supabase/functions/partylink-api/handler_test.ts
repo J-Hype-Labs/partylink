@@ -30,6 +30,10 @@ globalThis.fetch = (async (input: Request | URL | string, init?: RequestInit) =>
       : auth === "Bearer admin-token" ? jsonRes(200, ADMIN_USER)
       : jsonRes(401, { code: 401, msg: "invalid JWT" });
   }
+  if (u.pathname.startsWith("/auth/v1/admin/users/")) {
+    const id = u.pathname.slice("/auth/v1/admin/users/".length);
+    return id === USER.id ? jsonRes(200, USER) : jsonRes(404, { code: 404, error_code: "user_not_found", msg: "User not found" });
+  }
   if (u.pathname.startsWith("/rest/v1/rpc/")) {
     const fn = u.pathname.slice("/rest/v1/rpc/".length);
     const args = JSON.parse((await req.text()) || "{}");
@@ -132,7 +136,9 @@ Deno.test("DB error codes become Korean messages with matching HTTP status", asy
   const cases: [string, string, number, string][] = [
     ["PL409", "Guest already applied to slot x (or retry)", 409, "이미 신청한 파티입니다."],
     ["PL409", "Phone number is already registered to another account", 409, "이미 다른 계정에 등록된 연락처입니다."],
-    ["PL410", "Slot x is full (1/1)", 410, "모집이 마감되었거나 정원이 찼습니다."],
+    ["PL410", "Cannot cancel after the party starts", 410, "파티가 시작된 후에는 취소할 수 없습니다."],
+    ["PL410", "Slot x is not accepting applications", 410, "모집이 마감되었거나 정원이 찼습니다."],
+    ["PL410", "Slot x is full (1/1)", 410, "정원이 가득 차 더 선정할 수 없습니다. 정원을 늘리거나 다른 신청을 반려해 주세요."],
     ["PL400", "Invalid phone number", 400, "연락처를 정확히 입력해 주세요. (예: 01012345678)"],
     ["PL423", "Guest x is blocked", 423, "노쇼 누적 등으로 신청이 제한된 계정입니다."],
     ["XX000", "relation secret_table does not exist", 500, "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."],
@@ -240,6 +246,8 @@ Deno.test("admin-facing DB errors explain what happened (shortage amount, party 
       JSON.stringify({ balance: 3000, required: 10000, shortage: 7000 }), 402,
       "적립금이 7,000원 부족합니다. (잔액 3,000원, 필요 10,000원) 점포·적립금에서 충전한 뒤 다시 승인해 주세요."],
     ["PL410", "Visit verification is only allowed during the party window", null, 410, "방문 인증은 파티 진행 시간에만 할 수 있습니다."],
+    ["PL410", "No-show can only be marked after the party starts (2026-11-20 10:00)", null, 410, "파티가 시작된 후에만 노쇼 처리할 수 있습니다."],
+    ["PL410", "Slot 3333 is CANCELLED", null, 410, "이 파티는 '취소' 상태라 신청을 선정할 수 없습니다."],
     ["PL409", "Invalid status transition: COMPLETED -> COMPLETED", null, 409, "이미 처리된 신청입니다. 목록을 새로고침해 주세요."],
     ["PL409", "Invalid status transition: APPROVED -> COMPLETED", null, 409, "신청이 이미 '선정' 상태라 이 작업을 할 수 없습니다. 목록을 새로고침해 주세요."],
     ["PL409", "something unexpected", null, 409, "현재 상태에서는 처리할 수 없습니다."],
@@ -322,16 +330,89 @@ Deno.test("POST /admin/parties validates input and inserts only whitelisted colu
 
 Deno.test("PATCH /admin/parties/:id updates only given fields; empty / storeId patch rejected", async () => {
   reset();
-  tableImpl = adminTables((c) => c.table === "party_slots" && c.method === "PATCH"
-    ? jsonRes(200, { id: SLOT_ID, store_id: STORE_ID, status: "CLOSED", images: [], badges: [], applications: [] })
-    : undefined);
+  tableImpl = adminTables((c) => {
+    if (c.table !== "party_slots") return undefined;
+    if (c.method === "GET") return jsonRes(200, { status: "OPEN", capacity: 6, applications: [] }); // 전이 검증용 현재 값
+    if (c.method === "PATCH") return jsonRes(200, { id: SLOT_ID, store_id: STORE_ID, status: "CLOSED", images: [], badges: [], applications: [] });
+  });
   const res = await call("PATCH", `/admin/parties/${SLOT_ID}`, { token: "admin-token", body: { status: "CLOSED", id: "evil" } });
   assertEquals(res.status, 200);
   const patch = tableCalls.find((c) => c.method === "PATCH")!;
   assertEquals(patch.body, { status: "CLOSED" });
   assertEquals(patch.params.id, `eq.${SLOT_ID}`);
+  assertEquals(patch.params.status, "eq.OPEN", "현재 상태 조건을 걸어 동시 변경을 막는다");
   assertEquals((await call("PATCH", `/admin/parties/${SLOT_ID}`, { token: "admin-token", body: {} })).status, 400);
   assertEquals((await call("PATCH", `/admin/parties/${SLOT_ID}`, { token: "admin-token", body: { storeId: STORE_ID } })).status, 400);
+});
+
+Deno.test("PATCH /admin/parties/:id rejects reviving a cancelled/finished party and shrinking capacity below selected", async () => {
+  const cur = (status: string, capacity: number, selected: number) => adminTables((c) => {
+    if (c.table !== "party_slots") return undefined;
+    if (c.method === "GET") {
+      return jsonRes(200, { status, capacity, applications: [
+        ...Array.from({ length: selected }, () => ({ status: "APPROVED" })), { status: "APPLIED" }, { status: "REJECTED" },
+      ] });
+    }
+    return jsonRes(200, { id: SLOT_ID, store_id: STORE_ID, status: "OPEN", images: [], badges: [], applications: [] });
+  });
+  const patch = (body: Record<string, unknown>) => call("PATCH", `/admin/parties/${SLOT_ID}`, { token: "admin-token", body });
+  const wrote = () => tableCalls.some((c) => c.method === "PATCH");
+
+  for (const [from, to] of [["CANCELLED", "OPEN"], ["FINISHED", "OPEN"], ["CANCELLED", "CLOSED"], ["DRAFT", "FINISHED"], ["OPEN", "DRAFT"]]) {
+    reset(); tableImpl = cur(from, 6, 0);
+    const res = await patch({ status: to });
+    assertEquals(res.status, 409, `${from} -> ${to}`);
+    assertEquals((await res.json()).code, "PL409");
+    assert(!wrote(), `${from} -> ${to} must not write`);
+  }
+  // 허용되는 전이와, 같은 상태로의 요청(변경 없음)은 통과
+  for (const [from, to] of [["DRAFT", "OPEN"], ["OPEN", "CLOSED"], ["CLOSED", "OPEN"], ["CLOSED", "FINISHED"], ["OPEN", "CANCELLED"], ["OPEN", "OPEN"]]) {
+    reset(); tableImpl = cur(from, 6, 0);
+    assertEquals((await patch({ status: to })).status, 200, `${from} -> ${to}`);
+  }
+
+  // 정원: 선정된 인원(APPROVED 이상) 미만으로는 못 줄이고, 같거나 크면 가능. 신청만 한 사람·반려는 세지 않는다
+  reset(); tableImpl = cur("OPEN", 6, 3);
+  const low = await patch({ capacity: 2 });
+  assertEquals(low.status, 409);
+  assert((await low.json()).message.includes("3명"));
+  assert(!wrote());
+  reset(); tableImpl = cur("OPEN", 6, 3);
+  assertEquals((await patch({ capacity: 3 })).status, 200);
+
+  // 읽은 뒤 다른 곳에서 상태가 바뀌어 조건 갱신이 0행이면 409 (404 아님)
+  reset();
+  tableImpl = adminTables((c) => c.table === "party_slots"
+    ? (c.method === "GET" ? jsonRes(200, { status: "OPEN", capacity: 6, applications: [] }) : jsonRes(200, null))
+    : undefined);
+  assertEquals((await patch({ status: "CLOSED" })).status, 409);
+
+  // 존재하지 않는 파티
+  reset(); tableImpl = adminTables((c) => c.table === "party_slots" && c.method === "GET" ? jsonRes(200, null) : undefined);
+  assertEquals((await patch({ status: "CLOSED" })).status, 404);
+
+  // 상태·정원이 아닌 수정은 현재 값을 읽지 않는다
+  reset(); tableImpl = cur("CANCELLED", 6, 0);
+  assertEquals((await patch({ title: "새 제목" })).status, 200);
+  assert(!tableCalls.some((c) => c.method === "GET" && c.table === "party_slots"));
+});
+
+Deno.test("POST /admin/stores verifies a given ownerUserId exists; omitting it stays allowed", async () => {
+  reset();
+  tableImpl = adminTables((c) => c.table === "stores" && c.method === "POST" ? jsonRes(201, storeRow) : undefined);
+  const GHOST = "99999999-9999-4999-8999-999999999999";
+  const ghost = await call("POST", "/admin/stores", { token: "admin-token", body: { ...goodStore, ownerUserId: GHOST } });
+  assertEquals(ghost.status, 400);
+  assert((await ghost.json()).message.includes("점주 계정"));
+  assert(!tableCalls.some((c) => c.table === "stores" && c.method === "POST"), "unknown owner must not create a store");
+
+  reset();
+  tableImpl = adminTables((c) => c.table === "stores" && c.method === "POST" ? jsonRes(201, storeRow) : undefined);
+  const ok = await call("POST", "/admin/stores", { token: "admin-token", body: { ...goodStore, ownerUserId: USER.id } });
+  assertEquals(ok.status, 201);
+  const insert = tableCalls.find((c) => c.table === "stores" && c.method === "POST")!;
+  const row = (Array.isArray(insert.body) ? insert.body[0] : insert.body) as Record<string, unknown>;
+  assertEquals(row.owner_user_id, USER.id);
 });
 
 Deno.test("POST /admin/guests/:id/block toggles manual block and clears auto-block on release", async () => {
@@ -421,10 +502,15 @@ Deno.test("GET /admin/summary returns dashboard counts and flags low-balance sto
   const count = (n: number) => new Response("[]", { status: 200, headers: { "Content-Type": "application/json", "Content-Range": `*/${n}` } });
   tableImpl = adminTables((c) => {
     if (c.table === "applications") return count(4);
+    if (c.table === "party_slots" && c.method === "GET") return jsonRes(200, [
+      // 점포 s1: 잔액 5,000 < 다가오는 파티 최대 수수료 20,000 → 부족. s2: 잔액 50,000 ≥ 10,000 → 충분.
+      // s3: 잔액 0 이지만 다가오는 파티가 없어 세지 않음.
+      { store_id: "s1", fee_per_guest: 10000 }, { store_id: "s1", fee_per_guest: 20000 }, { store_id: "s2", fee_per_guest: 10000 },
+    ]);
     if (c.table === "party_slots") return c.params.status === "eq.OPEN" ? count(3) : count(2);
     if (c.table === "guests") return count(1);
     if (c.table === "stores") return jsonRes(200, [
-      { prepaid_balance: 5000, default_fee_per_guest: 10000 }, { prepaid_balance: 50000, default_fee_per_guest: 10000 },
+      { id: "s1", prepaid_balance: 5000 }, { id: "s2", prepaid_balance: 50000 }, { id: "s3", prepaid_balance: 0 },
     ]);
   });
   const res = await call("GET", "/admin/summary", { token: "admin-token" });
