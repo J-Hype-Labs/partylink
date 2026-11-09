@@ -116,6 +116,11 @@ async function listMyApplications(user: User) {
     status: r.status,
     visitCode: r.visit_code,
     rejectReason: r.reject_reason,
+    // 마이페이지용: 마지막으로 제출한 미션 URL. 관리자가 보완을 요청하면 status 는 VISITED 로 돌아가지만
+    // missionUrl 은 이전 제출값이 남으므로 (VISITED && missionUrl) 이면 "보완 요청됨" 으로 볼 수 있다.
+    missionUrl: r.mission_url,
+    approvedAt: r.approved_at,
+    visitedAt: r.visited_at,
     name: r.guest_name,
     phone: r.guest_phone,
     appliedAt: r.applied_at,
