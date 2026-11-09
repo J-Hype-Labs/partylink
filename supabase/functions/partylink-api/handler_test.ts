@@ -429,3 +429,43 @@ Deno.test("POST /admin/applications/:id/verify-visit verifies only the code issu
   assertEquals(missing.status, 400);
   assertEquals(rpcCalls.length, 0, "a mismatching code must never reach verify_visit");
 });
+
+// ---------------------------------------------------------------------
+// 미션 보완 요청 / 미션 제출
+// ---------------------------------------------------------------------
+Deno.test("POST /admin/applications/:id/request-revision calls request_mission_revision; needs an admin", async () => {
+  reset();
+  tableImpl = adminTables();
+  rpcImpl = () => jsonRes(200, { application_id: APP_ID, status: "VISITED" });
+  assertEquals((await call("POST", `/admin/applications/${APP_ID}/request-revision`)).status, 401);
+  assertEquals((await call("POST", `/admin/applications/${APP_ID}/request-revision`, { token: "good-token" })).status, 403);
+  assertEquals(rpcCalls.length, 0, "non-admins must not reach the DB function");
+
+  const ok = await call("POST", `/admin/applications/${APP_ID}/request-revision`, { token: "admin-token" });
+  assertEquals(ok.status, 200);
+  assertEquals(rpcCalls, [{ fn: "request_mission_revision", args: { p_application_id: APP_ID } }]);
+  assertEquals((await call("POST", "/admin/applications/not-a-uuid/request-revision", { token: "admin-token" })).status, 404);
+});
+
+Deno.test("POST /admin/applications/:id/request-revision maps a wrong status (PL409) to 409", async () => {
+  reset();
+  tableImpl = adminTables();
+  rpcImpl = () => jsonRes(400, { code: "PL409", message: "Invalid status transition: APPROVED -> VISITED" });
+  const res = await call("POST", `/admin/applications/${APP_ID}/request-revision`, { token: "admin-token" });
+  assertEquals(res.status, 409);
+});
+
+Deno.test("POST /applications/:id/mission uses the token's guest and validates the URL first", async () => {
+  reset();
+  rpcImpl = () => jsonRes(200, { application_id: APP_ID, status: "MISSION_SUBMITTED" });
+  assertEquals((await call("POST", `/applications/${APP_ID}/mission`, { body: { url: "https://instagram.com/p/x" } })).status, 401);
+  assertEquals((await call("POST", `/applications/${APP_ID}/mission`, { token: "good-token", body: { url: "javascript:alert(1)" } })).status, 400);
+  assertEquals((await call("POST", `/applications/${APP_ID}/mission`, { token: "good-token", body: {} })).status, 400);
+  assertEquals(rpcCalls.length, 0);
+
+  const res = await call("POST", `/applications/${APP_ID}/mission`, {
+    token: "good-token", body: { url: " https://instagram.com/p/x ", guestId: "evil" },
+  });
+  assertEquals(res.status, 200);
+  assertEquals(rpcCalls, [{ fn: "submit_mission", args: { p_application_id: APP_ID, p_guest_id: GUEST_ID, p_mission_url: "https://instagram.com/p/x" } }]);
+});

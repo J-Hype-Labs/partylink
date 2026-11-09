@@ -41,6 +41,7 @@
 | GET | /functions/v1/partylink-api/applications | 필요 | 현재 회원의 신청 내역 |
 | POST | /functions/v1/partylink-api/applications | 필요 | 신청: slotId, name, phone, agree |
 | POST | /functions/v1/partylink-api/applications/:id/cancel | 필요 | 본인 신청 취소 |
+| POST | /functions/v1/partylink-api/applications/:id/mission | 필요 | 미션 URL 제출 `{ url }` (방문 인증 후, 보완 요청 시 재제출) |
 
 응답 오류는 code와 한국어 message를 포함한다. 화면은 빈 목록과 API 오류를 구분한다.
 
@@ -154,6 +155,7 @@ SUPABASE_URL과 SUPABASE_SERVICE_ROLE_KEY는 Supabase Edge Function의 서버 �
 | GET | `/admin/applications?slotId=&status=` | 신청 목록 (게스트 연락처·미션 URL 포함) |
 | POST | `/admin/applications/:id/approve` | 선정 |
 | POST | `/admin/applications/:id/verify-visit` | 방문 인증 대행 `{ code }` (그 신청에 발급된 코드와 일치할 때만, 파티 시간대 안에서만) |
+| POST | `/admin/applications/:id/request-revision` | 미션 보완 요청 (미션 제출 → 방문 인증 상태로 되돌려 게스트가 다시 제출). 마이그레이션 `20261110000000_mission_revision.sql` 필요 |
 | POST | `/admin/applications/:id/reject` | 반려 `{ reason? }` |
 | POST | `/admin/applications/:id/complete` | 최종 승인 (수수료 차감) |
 | POST | `/admin/applications/:id/noshow` | 노쇼 처리 (벌점·자동 차단) |

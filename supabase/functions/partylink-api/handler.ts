@@ -6,6 +6,7 @@
 //   POST /partylink-api/applications              파티 신청           (카카오 로그인 필요)
 //        body: { slotId, name, phone, agree }
 //   POST /partylink-api/applications/:id/cancel   신청 취소           (카카오 로그인 필요)
+//   POST /partylink-api/applications/:id/mission  미션 URL 제출      (카카오 로그인 필요) body: { url }
 //   *    /partylink-api/admin/...                 관리자 API          (admins 테이블 등록 계정만, admin.ts)
 //
 // 보안 원칙
@@ -148,6 +149,17 @@ async function cancel(user: User, applicationId: string) {
   return await rpc("cancel_application", { p_application_id: applicationId, p_guest_id: guest.id });
 }
 
+// 미션 URL 제출 (방문 인증 후, 관리자가 보완을 요청한 뒤 재제출 포함). 게스트는 토큰으로 식별
+async function submitMission(user: User, applicationId: string, body: Record<string, unknown>) {
+  if (!UUID_RE.test(applicationId)) throw new HttpError(404, "대상을 찾을 수 없습니다.");
+  const url = String(body.url ?? "").trim().slice(0, 1000);
+  if (!/^https?:\/\//i.test(url)) throw new HttpError(400, "미션 URL은 http:// 또는 https:// 로 시작해야 합니다.");
+  const { data: guest, error } = await db.from("guests").select("id").eq("user_id", user.id).maybeSingle();
+  if (error) throw fromDbError(error);
+  if (!guest) throw new HttpError(404, "대상을 찾을 수 없습니다.");
+  return await rpc("submit_mission", { p_application_id: applicationId, p_guest_id: guest.id, p_mission_url: url });
+}
+
 // ---------------------------------------------------------------------
 // 라우터
 // ---------------------------------------------------------------------
@@ -174,6 +186,11 @@ export async function handler(req: Request): Promise<Response> {
     const cancelMatch = path.match(/^\/applications\/([^/]+)\/cancel$/);
     if (cancelMatch && req.method === "POST") {
       return json(req, 200, await cancel(await requireUser(req), cancelMatch[1]));
+    }
+    const missionMatch = path.match(/^\/applications\/([^/]+)\/mission$/);
+    if (missionMatch && req.method === "POST") {
+      const user = await requireUser(req);
+      return json(req, 200, await submitMission(user, missionMatch[1], await readJson(req)));
     }
     throw new HttpError(404, "Not found");
   } catch (e) {
