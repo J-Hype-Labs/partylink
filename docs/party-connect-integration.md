@@ -38,7 +38,7 @@
 | 메서드 | 경로 | 로그인 | 설명 |
 |---|---|---|---|
 | GET | /functions/v1/partylink-api/parties | 불필요 | 모집 중인 파티 목록 |
-| GET | /functions/v1/partylink-api/applications | 필요 | 현재 회원의 신청 내역 |
+| GET | /functions/v1/partylink-api/applications | 필요 | 현재 회원의 신청 내역. 마이페이지용 필드: `id, partyId, partyTitle, venue, day, startsAt, status, visitCode, rejectReason, missionUrl(마지막 제출 URL|null), approvedAt, visitedAt, name, phone, appliedAt, userId`. 보완 요청되면 `status`는 `VISITED`로 돌아가고 `missionUrl`에 이전 제출값이 남으므로 `status==='VISITED' && missionUrl` 이면 "보완 요청됨" |
 | POST | /functions/v1/partylink-api/applications | 필요 | 신청: slotId, name, phone, agree |
 | POST | /functions/v1/partylink-api/applications/:id/cancel | 필요 | 본인 신청 취소 |
 | POST | /functions/v1/partylink-api/applications/:id/mission | 필요 | 미션 URL 제출 `{ url }` (방문 인증 후, 보완 요청 시 재제출) |

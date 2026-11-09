@@ -152,7 +152,7 @@ Deno.test("GET /applications returns only the caller's applications", async () =
   reset();
   rpcImpl = () => jsonRes(200, [{
     id: "app-1", slot_id: SLOT_ID, status: "APPROVED", visit_code: "K7M2QX9HPA",
-    applied_at: "2026-11-01T00:00:00Z", approved_at: null, visited_at: null, mission_url: null, reject_reason: null,
+    applied_at: "2026-11-01T00:00:00Z", approved_at: "2026-11-02T00:00:00Z", visited_at: "2026-11-07T11:30:00Z", mission_url: "https://instagram.com/p/abc", reject_reason: null,
     title: "금요 혼술", starts_at: "2026-11-07T11:00:00Z", ends_at: "2026-11-07T14:00:00Z", store_name: "43번지 혼술바",
     guest_name: "홍길동", guest_phone: "01012345678",
   }]);
@@ -160,6 +160,8 @@ Deno.test("GET /applications returns only the caller's applications", async () =
   assertEquals(res.status, 200);
   const [a] = await res.json();
   assertEquals([a.partyId, a.status, a.visitCode, a.userId, a.day], [SLOT_ID, "APPROVED", "K7M2QX9HPA", USER.id, "토"]);
+  // 마이페이지가 미션 제출/보완 요청 상태를 그릴 수 있어야 한다
+  assertEquals([a.missionUrl, a.approvedAt, a.visitedAt], ["https://instagram.com/p/abc", "2026-11-02T00:00:00Z", "2026-11-07T11:30:00Z"]);
   assertEquals(rpcCalls, [{ fn: "guest_applications", args: { p_user_id: USER.id } }]);
 });
 
