@@ -38,6 +38,8 @@
 | 메서드 | 경로 | 로그인 | 설명 |
 |---|---|---|---|
 | GET | /functions/v1/partylink-api/parties | 불필요 | 모집 중인 파티 목록 |
+| GET | /functions/v1/partylink-api/me | 필요 | 내 프로필·가입 동의 여부. 응답은 아래 "가입 동의 API" 참고 |
+| POST | /functions/v1/partylink-api/me/onboarding | 필요 | 가입 동의 저장 `{ agreeTerms: true, agreePrivacy: true, agreeMarketing?: boolean, termsVersion?: string }`. 응답은 `GET /me`와 같음 |
 | GET | /functions/v1/partylink-api/applications | 필요 | 현재 회원의 신청 내역. 마이페이지용 필드: `id, partyId, partyTitle, venue, day, startsAt, status, visitCode, rejectReason, missionUrl(마지막 제출 URL|null), approvedAt, visitedAt, name, phone, appliedAt, userId`. 보완 요청되면 `status`는 `VISITED`로 돌아가고 `missionUrl`에 이전 제출값이 남으므로 `status==='VISITED' && missionUrl` 이면 "보완 요청됨" |
 | POST | /functions/v1/partylink-api/applications | 필요 | 신청: slotId, name, phone, agree |
 | POST | /functions/v1/partylink-api/applications/:id/cancel | 필요 | 본인 신청 취소 |
@@ -47,7 +49,38 @@
 
 현재 handler는 첫 신청 시 이름·연락처 등으로 guests 프로필을 upsert하고 auth user ID에 연결한다. Kakao 이메일은 제공되지 않을 수 있으므로 필수 식별자로 사용하지 않는다.
 
-회원 온보딩 동의 이력의 별도 영속 테이블/API는 현재 migration에서 확인되지 않았다. 서비스 이용약관·개인정보 처리 동의 기록이 필요하면 별도 migration, API, 테스트를 추가해야 한다. 브라우저 localStorage만으로 가입 완료를 판정하지 않는다.
+### 가입 동의 API (`GET /me`, `POST /me/onboarding`)
+
+동의 기록은 `user_consents` 테이블(마이그레이션 `20261111000000_user_consents.sql`)에 `(user_id, terms_version)` 단위로 저장한다. 서비스 이용약관·개인정보 수집·이용은 필수, 마케팅 수신은 선택이다. 브라우저 localStorage만으로 가입 완료를 판정하지 않는다.
+
+`GET /me` 응답 (로그인 필요, 401이면 로그인 만료):
+
+```json
+{
+  "id": "<auth user id>", "email": "…|null", "nickname": "…|null", "avatarUrl": "…|null",
+  "termsVersion": "2026-11-10",
+  "onboardingComplete": false,
+  "consent": null,
+  "guest": null
+}
+```
+
+- `termsVersion`: 지금 동의받아야 하는 약관 버전. 이 버전에 동의한 기록이 있어야 `onboardingComplete`가 true다(약관 버전이 오르면 기존 회원도 다시 false가 되어 재동의를 받는다).
+- `consent`: 동의했으면 `{ termsVersion, agreeTerms, agreePrivacy, agreeMarketing, consentedAt, marketingChangedAt }`, 아니면 `null`.
+- `guest`: 첫 신청 전에는 `null`, 신청한 뒤에는 `{ name, phone }`.
+
+`POST /me/onboarding` 요청 본문은 `{ agreeTerms: true, agreePrivacy: true, agreeMarketing: true|false(생략 시 false), termsVersion?: "2026-11-10" }`. 성공하면 200과 `GET /me`와 같은 응답(`onboardingComplete: true`)을 돌려준다.
+
+| 상태 | 의미 |
+|---|---|
+| 400 | `agreeTerms`·`agreePrivacy`가 `true`가 아니거나 `agreeMarketing`이 boolean이 아님 |
+| 401 | 로그인 필요/만료 |
+| 409 `TERMS_VERSION_MISMATCH` | 본문의 `termsVersion`이 현재 버전과 다름. `detail.termsVersion`이 현재 버전이니 화면을 새로고침해 다시 동의받는다 |
+
+- 같은 요청을 다시 보내도 안전하다(멱등). 최초 동의 시각(`consentedAt`)은 유지되고, 마케팅 값이 바뀐 경우에만 `agreeMarketing`과 `marketingChangedAt`이 갱신된다.
+- 사용자 ID는 본문에서 받지 않고 토큰으로만 식별한다.
+- 저장에 성공하면 Supabase Auth `user_metadata.onboarding_complete = true`도 함께 기록한다. 웹 `toAppUser`는 세션의 이 값으로 `onboardingComplete`를 읽으므로, 동의 직후 **세션을 갱신(`refreshSession`)하거나 `GET /me`의 `onboardingComplete`를 기준으로 삼아야** 한다. 이 기록이 실패해도 요청은 성공하며 DB 기록이 기준이다.
+- 약관 버전은 Edge Function 상수 `TERMS_VERSION`(환경변수 `TERMS_VERSION`으로 덮어쓰기 가능)이다. 약관을 고치면 이 값을 올리고 재배포한다.
 
 ## 4. Kakao Developers 설정
 
@@ -92,6 +125,8 @@ Kakao provider callback(Supabase 주소)과 Supabase의 앱 복귀 redirectTo(�
 PR #1의 웹 연동 migration:
 
 supabase/migrations/20261106000000_party_connect_integration.sql
+
+가입 동의 테이블(`user_consents`, 기존 데이터 변경 없음): `supabase/migrations/20261111000000_user_consents.sql`
 
 실행 전:
 - 현재 대상 DB의 schema/version 확인
