@@ -7,6 +7,9 @@
 //        body: { slotId, name, phone, agree }
 //   POST /partylink-api/applications/:id/cancel   신청 취소           (카카오 로그인 필요)
 //   POST /partylink-api/applications/:id/mission  미션 URL 제출      (카카오 로그인 필요) body: { url }
+//   GET  /partylink-api/me                        내 프로필·가입 동의 여부  (카카오 로그인 필요)
+//   POST /partylink-api/me/onboarding             가입 동의 저장            (카카오 로그인 필요)
+//        body: { agreeTerms: true, agreePrivacy: true, agreeMarketing?: boolean, termsVersion?: string }
 //   *    /partylink-api/admin/...                 관리자 API          (admins 테이블 등록 계정만, admin.ts)
 //
 // 보안 원칙
@@ -28,6 +31,10 @@ const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+// 현재 약관 버전. 약관을 고치면 이 값(또는 TERMS_VERSION 환경변수)을 올립니다.
+// 회원이 이 버전에 동의한 기록이 있어야 onboardingComplete 가 true 입니다.
+const TERMS_VERSION = Deno.env.get("TERMS_VERSION") ?? "2026-11-10";
 
 const DEFAULT_PARTY_IMAGE =
   "https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=600&q=80";
@@ -128,6 +135,94 @@ async function listMyApplications(user: User) {
   }));
 }
 
+// ---------------------------------------------------------------------
+// 내 정보 / 가입 동의
+// ---------------------------------------------------------------------
+type ConsentRow = {
+  terms_version: string; agreed_terms: boolean; agreed_privacy: boolean; agreed_marketing: boolean;
+  consented_at: string; marketing_changed_at: string;
+};
+const CONSENT_COLUMNS = "terms_version, agreed_terms, agreed_privacy, agreed_marketing, consented_at, marketing_changed_at";
+
+async function findConsent(userId: string): Promise<ConsentRow | null> {
+  const { data, error } = await db.from("user_consents").select(CONSENT_COLUMNS)
+    .eq("user_id", userId).eq("terms_version", TERMS_VERSION).maybeSingle();
+  if (error) throw fromDbError(error);
+  return data as ConsentRow | null;
+}
+
+const metaString = (m: Record<string, unknown> | undefined, ...keys: string[]): string | null => {
+  for (const k of keys) {
+    const v = m?.[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+};
+
+async function getMe(user: User) {
+  const consent = await findConsent(user.id);
+  const { data: guest, error } = await db.from("guests").select("name, phone").eq("user_id", user.id).maybeSingle();
+  if (error) throw fromDbError(error);
+  return {
+    id: user.id,
+    email: user.email ?? null,
+    nickname: metaString(user.user_metadata, "nickname", "name", "full_name", "preferred_username"),
+    avatarUrl: metaString(user.user_metadata, "avatar_url", "picture"),
+    termsVersion: TERMS_VERSION, // 지금 동의받아야 하는 약관 버전
+    onboardingComplete: consent !== null,
+    consent: consent && {
+      termsVersion: consent.terms_version,
+      agreeTerms: consent.agreed_terms,
+      agreePrivacy: consent.agreed_privacy,
+      agreeMarketing: consent.agreed_marketing,
+      consentedAt: consent.consented_at,
+      marketingChangedAt: consent.marketing_changed_at,
+    },
+    guest: guest ? { name: guest.name as string, phone: guest.phone as string } : null, // 첫 신청 전에는 null
+  };
+}
+
+// 필수 동의 + 선택 마케팅 동의 저장. 같은 요청을 다시 보내도 안전합니다(멱등).
+async function completeOnboarding(user: User, body: Record<string, unknown>) {
+  if (body.agreeTerms !== true || body.agreePrivacy !== true) {
+    throw new HttpError(400, "이용약관과 개인정보 수집·이용에 모두 동의해 주세요.");
+  }
+  if (body.agreeMarketing !== undefined && typeof body.agreeMarketing !== "boolean") {
+    throw new HttpError(400, "마케팅 수신 동의 값이 올바르지 않습니다.");
+  }
+  if (body.termsVersion !== undefined && body.termsVersion !== TERMS_VERSION) {
+    throw new HttpError(409, "약관이 갱신되었습니다. 화면을 새로고침한 뒤 다시 동의해 주세요.", "TERMS_VERSION_MISMATCH", { termsVersion: TERMS_VERSION });
+  }
+  const marketing = body.agreeMarketing === true;
+
+  const existing = await findConsent(user.id);
+  if (!existing) {
+    const { error } = await db.from("user_consents").insert({
+      user_id: user.id, terms_version: TERMS_VERSION,
+      agreed_terms: true, agreed_privacy: true, agreed_marketing: marketing,
+    });
+    // 동시에 두 번 눌러 먼저 들어간 행이 있으면(23505) 그대로 성공으로 본다
+    if (error && error.code !== "23505") throw fromDbError(error);
+  } else if (existing.agreed_marketing !== marketing) {
+    const { error } = await db.from("user_consents").update({
+      agreed_marketing: marketing, marketing_changed_at: new Date().toISOString(),
+    }).eq("user_id", user.id).eq("terms_version", TERMS_VERSION);
+    if (error) throw fromDbError(error);
+  }
+
+  // 웹은 세션의 user_metadata.onboarding_complete 로 동의 여부를 판단하므로 같이 맞춰 둔다.
+  // (새 값은 웹이 세션을 refreshSession 한 뒤부터 보인다.) 실패해도 DB 기록이 기준이라 요청은 성공 처리.
+  try {
+    const { error } = await db.auth.admin.updateUserById(user.id, {
+      user_metadata: { ...(user.user_metadata ?? {}), onboarding_complete: true, terms_version: TERMS_VERSION },
+    });
+    if (error) console.error("onboarding metadata sync failed", error.message);
+  } catch (e) {
+    console.error("onboarding metadata sync failed", e);
+  }
+  return await getMe(user);
+}
+
 async function apply(user: User, body: Record<string, unknown>) {
   const slotId = String(body.slotId ?? "");
   const name = String(body.name ?? "").slice(0, 50);
@@ -180,6 +275,13 @@ export async function handler(req: Request): Promise<Response> {
     }
     if (path === "/parties" && req.method === "GET") {
       return json(req, 200, await listParties());
+    }
+    if (path === "/me" && req.method === "GET") {
+      return json(req, 200, await getMe(await requireUser(req)));
+    }
+    if (path === "/me/onboarding" && req.method === "POST") {
+      const user = await requireUser(req);
+      return json(req, 200, await completeOnboarding(user, await readJson(req)));
     }
     if (path === "/applications" && req.method === "GET") {
       return json(req, 200, await listMyApplications(await requireUser(req)));

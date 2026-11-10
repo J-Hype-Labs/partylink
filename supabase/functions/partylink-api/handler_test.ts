@@ -12,6 +12,8 @@ let rpcImpl: (fn: string, args: Record<string, unknown>) => Response = () => new
 type TableCall = { table: string; method: string; params: Record<string, string>; body?: unknown };
 let tableCalls: TableCall[] = [];
 let tableImpl: ((c: TableCall) => Response | undefined) | null = null;
+let authUpdates: { id: string; body: Record<string, unknown> }[] = [];
+let authUpdateStatus = 200;
 const ADMIN_USER = { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", email: "admin@example.com", aud: "authenticated", role: "authenticated" };
 const USER = { id: "11111111-1111-4111-8111-111111111111", email: "kakao@example.com", aud: "authenticated", role: "authenticated" };
 const GUEST_ID = "22222222-2222-4222-8222-222222222222";
@@ -32,6 +34,10 @@ globalThis.fetch = (async (input: Request | URL | string, init?: RequestInit) =>
   }
   if (u.pathname.startsWith("/auth/v1/admin/users/")) {
     const id = u.pathname.slice("/auth/v1/admin/users/".length);
+    if (req.method === "PUT") {
+      authUpdates.push({ id, body: JSON.parse((await req.text()) || "{}") });
+      return authUpdateStatus === 200 ? jsonRes(200, USER) : jsonRes(500, { msg: "boom" });
+    }
     return id === USER.id ? jsonRes(200, USER) : jsonRes(404, { code: 404, error_code: "user_not_found", msg: "User not found" });
   }
   if (u.pathname.startsWith("/rest/v1/rpc/")) {
@@ -69,7 +75,7 @@ const call = (method: string, path: string, opts: { token?: string; body?: unkno
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   }));
 
-const reset = () => { rpcCalls = []; rpcImpl = () => jsonRes(200, []); tableCalls = []; tableImpl = null; };
+const reset = () => { rpcCalls = []; rpcImpl = () => jsonRes(200, []); tableCalls = []; tableImpl = null; authUpdates = []; authUpdateStatus = 200; };
 
 Deno.test("GET /parties maps DB rows to the web card shape (KST weekday, default image)", async () => {
   reset();
@@ -576,4 +582,152 @@ Deno.test("POST /applications/:id/mission uses the token's guest and validates t
   });
   assertEquals(res.status, 200);
   assertEquals(rpcCalls, [{ fn: "submit_mission", args: { p_application_id: APP_ID, p_guest_id: GUEST_ID, p_mission_url: "https://instagram.com/p/x" } }]);
+});
+
+// ---------------------------------------------------------------------
+// GET /me, POST /me/onboarding (가입 동의)
+// ---------------------------------------------------------------------
+const TERMS = "2026-11-10";
+const CONSENT_ROW = {
+  terms_version: TERMS, agreed_terms: true, agreed_privacy: true, agreed_marketing: false,
+  consented_at: "2026-11-10T01:00:00Z", marketing_changed_at: "2026-11-10T01:00:00Z",
+};
+// 가짜 user_consents / guests 테이블: consents 가 비어 있으면 아직 미동의
+function meTables(state: { consent: Record<string, unknown> | null; guest?: Record<string, unknown> | null }) {
+  return (c: TableCall) => {
+    if (c.table.startsWith("user_consents")) {
+      if (c.method === "GET") return jsonRes(200, state.consent ? [state.consent] : []);
+      if (c.method === "POST") { // insert
+        state.consent = { ...CONSENT_ROW, ...(c.body as Record<string, unknown>) };
+        return jsonRes(201, []);
+      }
+      if (c.method === "PATCH") {
+        state.consent = { ...state.consent, ...(c.body as Record<string, unknown>) };
+        return new Response(null, { status: 204 });
+      }
+    }
+    if (c.table.startsWith("guests") && c.method === "GET") return jsonRes(200, state.guest ? [state.guest] : []);
+    return undefined;
+  };
+}
+
+Deno.test("GET /me requires login", async () => {
+  reset();
+  assertEquals((await call("GET", "/me")).status, 401);
+  assertEquals((await call("POST", "/me/onboarding", { body: { agreeTerms: true, agreePrivacy: true } })).status, 401);
+});
+
+Deno.test("GET /me: new member has onboardingComplete=false and the current terms version", async () => {
+  reset();
+  tableImpl = meTables({ consent: null, guest: null });
+  const res = await call("GET", "/me", { token: "good-token" });
+  assertEquals(res.status, 200);
+  const me = await res.json();
+  assertEquals([me.id, me.email, me.onboardingComplete, me.termsVersion, me.consent, me.guest], [USER.id, USER.email, false, TERMS, null, null]);
+  const q = tableCalls.find((c) => c.table.startsWith("user_consents"))!;
+  assertEquals([q.params.user_id, q.params.terms_version], [`eq.${USER.id}`, `eq.${TERMS}`]);
+});
+
+Deno.test("GET /me: consented member sees consent record and guest profile", async () => {
+  reset();
+  tableImpl = meTables({ consent: { ...CONSENT_ROW, agreed_marketing: true }, guest: { name: "홍길동", phone: "01012345678" } });
+  const me = await (await call("GET", "/me", { token: "good-token" })).json();
+  assertEquals(me.onboardingComplete, true);
+  assertEquals(me.consent, {
+    termsVersion: TERMS, agreeTerms: true, agreePrivacy: true, agreeMarketing: true,
+    consentedAt: "2026-11-10T01:00:00Z", marketingChangedAt: "2026-11-10T01:00:00Z",
+  });
+  assertEquals(me.guest, { name: "홍길동", phone: "01012345678" });
+});
+
+Deno.test("POST /me/onboarding rejects missing required consent / bad values", async () => {
+  const bad: [Record<string, unknown>, number][] = [
+    [{}, 400],
+    [{ agreeTerms: true }, 400],
+    [{ agreeTerms: true, agreePrivacy: false }, 400],
+    [{ agreeTerms: "true", agreePrivacy: true }, 400],
+    [{ agreeTerms: true, agreePrivacy: true, agreeMarketing: "yes" }, 400],
+    [{ agreeTerms: true, agreePrivacy: true, termsVersion: "1999-01-01" }, 409],
+  ];
+  for (const [body, status] of bad) {
+    reset();
+    const state = { consent: null };
+    tableImpl = meTables(state);
+    const res = await call("POST", "/me/onboarding", { token: "good-token", body });
+    assertEquals(res.status, status, JSON.stringify(body));
+    const j = await res.json();
+    assert(j.message);
+    assertEquals(state.consent, null, "nothing may be stored");
+    assertEquals(authUpdates.length, 0);
+  }
+  reset();
+  tableImpl = meTables({ consent: null });
+  const res = await call("POST", "/me/onboarding", { token: "good-token", body: { agreeTerms: true, agreePrivacy: true, termsVersion: "1999-01-01" } });
+  assertEquals((await res.json()).code, "TERMS_VERSION_MISMATCH");
+});
+
+Deno.test("POST /me/onboarding stores consent for the token's user, ignores body user ids, syncs auth metadata", async () => {
+  reset();
+  const state: { consent: Record<string, unknown> | null } = { consent: null };
+  tableImpl = meTables(state);
+  const res = await call("POST", "/me/onboarding", {
+    token: "good-token",
+    body: { agreeTerms: true, agreePrivacy: true, agreeMarketing: true, termsVersion: TERMS, user_id: "evil", userId: "evil" },
+  });
+  assertEquals(res.status, 200);
+  const me = await res.json();
+  assertEquals([me.onboardingComplete, me.consent.agreeMarketing, me.termsVersion], [true, true, TERMS]);
+  const insert = tableCalls.find((c) => c.method === "POST" && c.table.startsWith("user_consents"))!;
+  assertEquals(insert.body, {
+    user_id: USER.id, terms_version: TERMS, agreed_terms: true, agreed_privacy: true, agreed_marketing: true,
+  });
+  assertEquals(authUpdates.length, 1);
+  assertEquals(authUpdates[0].id, USER.id);
+  const meta = authUpdates[0].body.user_metadata as Record<string, unknown>;
+  assertEquals([meta.onboarding_complete, meta.terms_version], [true, TERMS]);
+});
+
+Deno.test("POST /me/onboarding is idempotent and only touches marketing when it changed", async () => {
+  // 같은 값으로 다시 보내면 쓰기 없음
+  reset();
+  tableImpl = meTables({ consent: { ...CONSENT_ROW, agreed_marketing: false } });
+  let res = await call("POST", "/me/onboarding", { token: "good-token", body: { agreeTerms: true, agreePrivacy: true } });
+  assertEquals(res.status, 200);
+  assertEquals(tableCalls.filter((c) => c.method !== "GET").length, 0);
+
+  // 마케팅 값이 바뀌면 그 값과 변경 시각만 갱신 (최초 동의 시각은 그대로)
+  reset();
+  const state = { consent: { ...CONSENT_ROW, agreed_marketing: false } as Record<string, unknown> | null };
+  tableImpl = meTables(state);
+  res = await call("POST", "/me/onboarding", { token: "good-token", body: { agreeTerms: true, agreePrivacy: true, agreeMarketing: true } });
+  assertEquals(res.status, 200);
+  const patch = tableCalls.find((c) => c.method === "PATCH")!;
+  assertEquals(Object.keys(patch.body as object).sort(), ["agreed_marketing", "marketing_changed_at"]);
+  assertEquals((patch.body as Record<string, unknown>).agreed_marketing, true);
+  assertEquals(state.consent!.consented_at, CONSENT_ROW.consented_at);
+});
+
+Deno.test("POST /me/onboarding succeeds even if auth metadata sync fails (DB is the source of truth)", async () => {
+  reset();
+  authUpdateStatus = 500;
+  tableImpl = meTables({ consent: null });
+  const res = await call("POST", "/me/onboarding", { token: "good-token", body: { agreeTerms: true, agreePrivacy: true } });
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).onboardingComplete, true);
+});
+
+Deno.test("POST /me/onboarding treats a concurrent duplicate insert (23505) as success", async () => {
+  reset();
+  const state = { consent: null as Record<string, unknown> | null };
+  const inner = meTables(state);
+  tableImpl = (c) => {
+    if (c.method === "POST" && c.table.startsWith("user_consents")) {
+      state.consent = { ...CONSENT_ROW }; // 다른 요청이 먼저 저장
+      return jsonRes(409, { code: "23505", message: "duplicate key", details: null, hint: null });
+    }
+    return inner(c);
+  };
+  const res = await call("POST", "/me/onboarding", { token: "good-token", body: { agreeTerms: true, agreePrivacy: true } });
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()).onboardingComplete, true);
 });
