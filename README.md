@@ -1,6 +1,6 @@
 # PartyLink 데이터베이스 및 API
 
-PartyLink는 PartyConnect 웹 프런트엔드와 점주/운영 업무를 위한 Supabase PostgreSQL 스키마 및 서버 측 업무 함수다.
+PartyLink는 HypeConnect 웹 프런트엔드와 점주/운영 업무를 위한 Supabase PostgreSQL 스키마 및 서버 측 업무 함수다.
 
 - 저장소: https://github.com/J-Hype-Labs/partylink
 - 프런트엔드: https://github.com/J-Hype-Labs/party-connect-mvp

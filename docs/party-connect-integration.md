@@ -1,4 +1,4 @@
-# PartyConnect 웹 ↔ PartyLink DB 연동 가이드
+# HypeConnect 웹 ↔ PartyLink DB 연동 가이드
 
 - 기준일: 2026-11-08
 - 프런트엔드 저장소: https://github.com/J-Hype-Labs/party-connect-mvp
@@ -6,7 +6,7 @@
 - 관련 백엔드 PR: https://github.com/J-Hype-Labs/partylink/pull/1
 - 프런트엔드 인증 상세: https://github.com/J-Hype-Labs/party-connect-mvp/blob/main/docs/AUTH_IMPLEMENTATION_SPEC.md
 
-이 문서는 PartyConnect의 Kakao OAuth/Supabase Auth와 PartyLink DB API의 연동 계약 및 배포 순서를 설명한다. 현재 문서에 적힌 코드/설정이 운영 Supabase에 배포되었다는 뜻은 아니다.
+이 문서는 HypeConnect의 Kakao OAuth/Supabase Auth와 PartyLink DB API의 연동 계약 및 배포 순서를 설명한다. 현재 문서에 적힌 코드/설정이 운영 Supabase에 배포되었다는 뜻은 아니다.
 
 ## 1. 현재 상태
 
