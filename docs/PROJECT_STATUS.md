@@ -67,7 +67,7 @@
 | 담당 | 맡는 영역 | 대표 파일 |
 |---|---|---|
 | **DB/서버 + 관리자 화면** | DB 마이그레이션, Edge Function, 관리자 API, `/admin/` 화면과 그 테스트 | `partylink/supabase/**`, `party-connect-mvp/admin/**`, `js/admin-*.js`, `tests/admin-*.spec.js` |
-| **사용자 화면 (협업자)** | 메인 페이지·파티커넥트 페이지 UI, 인증 모듈, 사용자 문서, E2E 안정화 | `index.html`, `party-connect/index.html`, `js/auth-*.js`, `js/party-*.js`, `tests/comprehensive.spec.js`, `tests/party-connect-page.spec.js`, `tests/user-journey-regression.spec.js`, `docs/AUTH_*` |
+| **사용자 화면 (협업자)** | 메인 페이지·HypeConnect 페이지 UI, 인증 모듈, 사용자 문서, E2E 안정화 | `index.html`, `party-connect/index.html`, `js/auth-*.js`, `js/party-*.js`, `tests/comprehensive.spec.js`, `tests/party-connect-page.spec.js`, `tests/user-journey-regression.spec.js`, `docs/AUTH_*` |
 | **PM (조율)** | 우선순위, 병합·배포 승인, 사용자 확인 필요한 변경 전달 | — |
 
 ### 공통 규칙
