@@ -4,13 +4,20 @@ PartyLink는 HypeConnect 웹 프런트엔드와 점주/운영 업무를 위한 S
 
 - 저장소: https://github.com/J-Hype-Labs/partylink
 - 프런트엔드: https://github.com/J-Hype-Labs/party-connect-mvp
-- 웹 연동 PR: https://github.com/J-Hype-Labs/partylink/pull/1
 
-## 현재 상태
+## 기준 문서
 
-2026-11-08 확인 기준, 웹 연동 migration과 partylink-api Edge Function은 feature/party-connect-integration 브랜치의 PR #1에 포함되어 있으나 아직 main에 병합되지 않았다. Supabase 운영 프로젝트에 migration 또는 Edge Function이 배포되었다고 간주하지 않는다.
+제품 범위, 현재 상태, 업무 분담(Part A 서버·운영 / Part B 사용자 웹), 개발·동기화 규칙은 웹 저장소의 **[SPECIFICATION.md](https://github.com/J-Hype-Labs/party-connect-mvp/blob/main/SPECIFICATION.md)** 하나를 기준으로 한다. 이 저장소는 Part A가 담당한다.
 
-프런트엔드 main에는 Kakao OAuth/Supabase Auth 호출 코드가 있지만 Supabase URL 및 공개 키가 비어 있어 실제 인증·DB 연동은 검증되지 않았다.
+이 저장소의 상세 문서:
+
+- [docs/party-connect-integration.md](docs/party-connect-integration.md): API 계약, Supabase·카카오 설정 순서
+- [docs/admin-page-spec.md](docs/admin-page-spec.md): 관리자 화면 확정 명세(v1.0)
+- [docs/settlement-check.md](docs/settlement-check.md): 정산 교차 검증 SQL
+
+## 현재 상태 (2026-11-10)
+
+마이그레이션 4개(`20261105`, `20261106`, `20261107`, `20261110`)가 운영 Supabase에 적용돼 있고, `partylink-api` v8이 배포돼 있다. 자세한 상태는 SPECIFICATION.md 4장을 따른다.
 
 ## 데이터 구조
 
