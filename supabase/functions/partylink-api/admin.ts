@@ -193,7 +193,18 @@ async function countOf(table: string, filter: (q: any) => any): Promise<number> 
   return count ?? 0;
 }
 
+// 시간이 지난 파티의 상태(마감·종료)를 맞춘다. pg_cron 이 같은 일을 5분마다 하지만, 그것이 꺼져 있거나
+// 아직 마이그레이션 전이어도 관리자 화면이 맞는 상태를 보도록 조회 때도 호출한다. 실패해도 조회는 계속한다.
+async function syncSlotStatus() {
+  try {
+    await rpc("sync_party_slot_status");
+  } catch (e) {
+    console.error("sync_party_slot_status failed", e);
+  }
+}
+
 async function summary() {
+  await syncSlotStatus();
   const now = new Date();
   const weekEnd = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
   const [pendingApplications, openParties, partiesThisWeek, blockedGuests, stores, upcoming] = await Promise.all([
@@ -279,6 +290,7 @@ function toParty(r: SlotRow) {
 }
 
 async function listParties(url: URL) {
+  await syncSlotStatus();
   const status = oneOf(url.searchParams.get("status"), SLOT_STATUSES, "status");
   let q = db.from("party_slots").select(SLOT_SELECT);
   if (status) q = q.eq("status", status);
