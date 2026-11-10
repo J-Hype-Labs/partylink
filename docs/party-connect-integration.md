@@ -128,6 +128,11 @@ supabase/migrations/20261106000000_party_connect_integration.sql
 
 가입 동의 테이블(`user_consents`, 기존 데이터 변경 없음): `supabase/migrations/20261111000000_user_consents.sql`
 
+파티 상태 자동 전환(`sync_party_slot_status()` + pg_cron 5분 주기, 기존 데이터 변경 없음): `supabase/migrations/20261112000000_slot_auto_status.sql`
+- 모집 마감이 지난 `OPEN` → `CLOSED`, 종료 시각이 지난 `OPEN`/`CLOSED` → `FINISHED`. `DRAFT`·`CANCELLED`와 신청(applications)은 건드리지 않는다.
+- pg_cron이 켜지지 않아도 마이그레이션은 성공하고, 관리자 `GET /admin/parties`·`/admin/summary`가 같은 함수를 먼저 호출한다. 공개 목록·신청은 원래부터 `recruit_deadline`을 직접 비교한다.
+- 확인: `select jobname, schedule, active from cron.job;`
+
 실행 전:
 - 현재 대상 DB의 schema/version 확인
 - 기본 v2 스키마 선행 조건 확인

@@ -731,3 +731,23 @@ Deno.test("POST /me/onboarding treats a concurrent duplicate insert (23505) as s
   assertEquals(res.status, 200);
   assertEquals((await res.json()).onboardingComplete, true);
 });
+
+// ---------------------------------------------------------------------
+// 파티 상태 자동 전환: 관리자 조회가 sync_party_slot_status 를 호출하고, 실패해도 조회는 계속된다
+// ---------------------------------------------------------------------
+Deno.test("admin GET /parties and /summary run sync_party_slot_status first; a sync failure does not break them", async () => {
+  const empty = (c: TableCall) => c.table === "admins" ? undefined : new Response("[]", { status: 200, headers: { "Content-Type": "application/json", "Content-Range": "*/0" } });
+  for (const path of ["/admin/parties", "/admin/summary"]) {
+    reset();
+    tableImpl = adminTables(empty);
+    const res = await call("GET", path, { token: "admin-token" });
+    assertEquals(res.status, 200, path);
+    assertEquals(rpcCalls.filter((c) => c.fn === "sync_party_slot_status").length, 1, path);
+
+    reset();
+    tableImpl = adminTables(empty);
+    rpcImpl = (fn) => fn === "sync_party_slot_status" ? jsonRes(404, { code: "42883", message: "function does not exist" }) : jsonRes(200, []);
+    const failed = await call("GET", path, { token: "admin-token" });
+    assertEquals(failed.status, 200, `${path} must still work before the migration is applied`);
+  }
+});
