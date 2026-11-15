@@ -1,7 +1,7 @@
 layout: stat
 title: 고정비 0원, 승인된 손님만큼만
 stat: 10,000원
-stat_label: 승인된 게스트 1인당 기본 수수료
+stat_label: 승인된 게스트 1인당 기본 수수료\n(부가세 별도)
 points:
   - head: 가입비·월 고정비 0원
     body: 승인된 게스트 수수료 외에 내는 돈이 없습니다
