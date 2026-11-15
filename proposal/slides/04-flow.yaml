@@ -1,0 +1,16 @@
+layout: flow
+title: 신청부터 정산까지 다섯 단계
+steps:
+  - head: 신청
+    body: 게스트가\n파티 보고 신청
+  - head: 선정
+    body: 조건에 맞는\n게스트를 선정
+  - head: 방문 인증
+    body: 현장에서\n방문 코드 확인
+  - head: 리뷰 미션
+    body: 게스트가\n리뷰 링크 제출
+  - head: 최종 승인
+    body: 검수 후 승인,\n수수료 차감
+caption: 미션이 기준에 못 미치면 보완을 요청하고, 게스트가 다시 제출합니다
+notes: |
+  MVP 기간에는 선정·방문 인증·승인을 HypeConnect 운영팀이 대신 처리합니다.
