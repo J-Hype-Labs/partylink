@@ -2,7 +2,7 @@ layout: flow
 title: 신청부터 정산까지 다섯 단계
 steps:
   - head: 신청
-    body: 게스트가\n파티 보고 신청
+    body: 게스트가\n모집 보고 신청
   - head: 선정
     body: 조건에 맞는\n게스트를 선정
   - head: 방문 인증
