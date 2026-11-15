@@ -177,7 +177,7 @@ def stat(s, d, n):
     title(s, d["title"])
     lw = 4.6
     box(s, MX, CONTENT_Y, lw, 4.5, INK)
-    text(s, MX + 0.5, CONTENT_Y + 0.7, lw - 1, 1.2, d["stat"], size=60, bold=True, color=WHITE)
+    text(s, MX + 0.5, CONTENT_Y + 0.7, lw - 0.7, 1.2, d["stat"], size=52, bold=True, color=WHITE)
     text(s, MX + 0.5, CONTENT_Y + 1.95, lw - 1, 0.8, d["stat_label"], size=16, color=DARK_MUTED, spacing=1.3)
     text(s, MX + 0.5, CONTENT_Y + 3.3, lw - 1, 0.8, d["example"], size=14, bold=True, color=ROSE_SOFT, spacing=1.3)
     rx = MX + lw + 0.5
