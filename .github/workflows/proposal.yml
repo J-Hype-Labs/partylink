@@ -1,0 +1,24 @@
+name: proposal
+
+# proposal/ 를 고친 PR마다 제안서 .pptx를 빌드해 Artifacts로 올린다.
+on:
+  pull_request:
+    paths: ["proposal/**"]
+  push:
+    branches: [main]
+    paths: ["proposal/**"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r proposal/requirements.txt
+      - run: python proposal/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HypeConnect-proposal
+          path: proposal/dist/*.pptx

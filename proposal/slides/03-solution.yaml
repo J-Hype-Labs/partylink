@@ -1,0 +1,10 @@
+layout: statement
+title: HypeConnect는 혼술바와 체험단 게스트를 연결합니다
+statement: 혼술바는 혜택을 걸고 체험단을 모집하고, 게스트는 방문해 리뷰 미션을 수행합니다.\n수수료는 미션이 최종 승인된 게스트에게만 발생합니다
+points:
+  - head: 모집
+    body: HypeConnect 웹에 모집 공개,\n카카오 로그인 회원이 신청
+  - head: 검증
+    body: 방문 코드로 실제 방문 확인,\n미션 결과물 검수
+  - head: 정산
+    body: 선불 적립금에서 승인 건만\n자동 차감, 내역 전부 공개
