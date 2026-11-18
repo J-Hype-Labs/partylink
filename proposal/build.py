@@ -227,7 +227,7 @@ def mission(s, d, n):
     text(s, MX, 1.45, W - 2 * MX, 0.4, d["lead"], size=16, color=MUTED)
     tw = 7.2
     rows = d["fields"]
-    rh = 0.7
+    rh = min(0.7, 3.6 / len(rows))  # 6줄 이상이면 줄 높이를 줄여 아래 문구가 꼬리말과 겹치지 않게
     y0 = 2.25
     box(s, MX, y0, tw, rh * len(rows), WHITE, line=BORDER, radius=0.04)
     for i, (k, v) in enumerate(rows):
